@@ -28,3 +28,16 @@
     background-image:-ms-linear-gradient(rgba(10,77,123,0.1),#fff);
     background-image:-o-linear-gradient(rgba(10,77,123,0.1),#fff);
 }
+
+.mlkpro{
+    color: #636362;
+    font-size: 22px;
+    line-height: 22px;
+    margin-bottom: 15px;
+    width: 43%;
+    margin: 0 auto;
+    text-align: center;
+}
+.goodnesssec a{
+    text-decoration: none;
+}
