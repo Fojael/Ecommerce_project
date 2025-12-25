@@ -1,0 +1,100 @@
+{% extends "app/base.html" %}
+{% load static %}
+{% block title %}Customer Registration{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 col-lg-5">
+            <div class="card shadow-lg border-0">
+                <div class="card-body p-4">
+
+                    <h3 class="text-center mb-4 fw-bold">Create Account</h3>
+
+                    {% if msg %}
+                        <div class="alert alert-success text-center">{{ msg }}</div>
+                    {% endif %}
+
+                    <form method="post" novalidate>
+                        {% csrf_token %}
+
+                        <!-- Username -->
+                        <div class="mb-3">
+                            <label class="form-label">Username</label>
+                            {{ form.username }}
+                            <small class="text-danger">{{ form.username.errors }}</small>
+                        </div>
+
+                        <!-- Email -->
+                        <div class="mb-3">
+                            <label class="form-label">Email</label>
+                            {{ form.email }}
+                            <small class="text-danger">{{ form.email.errors }}</small>
+                        </div>
+
+                        <!-- First Name -->
+                        <div class="mb-3">
+                            <label class="form-label">First Name</label>
+                            {{ form.first_name }}
+                        </div>
+
+                        <!-- Last Name -->
+                        <div class="mb-3">
+                            <label class="form-label">Last Name</label>
+                            {{ form.last_name }}
+                        </div>
+
+                        <!-- Password -->
+                        <div class="mb-3 position-relative">
+                            <label class="form-label">Password</label>
+                            {{ form.password1 }}
+                            <span class="position-absolute top-50 end-0 me-3 cursor-pointer"
+                                  onclick="togglePassword('password1', this)">
+                                👁
+                            </span>
+                            <small class="text-danger">{{ form.password1.errors }}</small>
+                        </div>
+
+                        <!-- Confirm Password -->
+                        <div class="mb-3 position-relative">
+                            <label class="form-label">Confirm Password</label>
+                            {{ form.password2 }}
+                            <span class="position-absolute top-50 end-0 me-3 cursor-pointer"
+                                  onclick="togglePassword('password2', this)">
+                                👁
+                            </span>
+                            <small class="text-danger">{{ form.password2.errors }}</small>
+                        </div>
+
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-success btn-lg">
+                                Register
+                            </button>
+                        </div>
+                    </form>
+
+                    <p class="text-center mt-3">
+                        Already have an account?
+                        <a href="#" class="text-decoration-none">Login</a>
+                    </p>
+
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Password Toggle Script -->
+<script>
+function togglePassword(fieldId, icon) {
+    const field = document.getElementById(fieldId);
+    if (field.type === "password") {
+        field.type = "text";
+        icon.innerText = "🙈";
+    } else {
+        field.type = "password";
+        icon.innerText = "👁";
+    }
+}
+</script>
+{% endblock main-content %}
