@@ -1,0 +1,66 @@
+{% extends "app/base.html" %}
+{% block title %}Login{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row justify-content-center">
+        <div class="col-md-5">
+            <div class="card shadow-lg border-0">
+                <div class="card-body p-4">
+
+                    <h3 class="text-center fw-bold mb-4">Login</h3>
+
+                    {% if form.non_field_errors %}
+                        <div class="alert alert-danger">
+                            {{ form.non_field_errors }}
+                        </div>
+                    {% endif %}
+
+                    <form method="post">
+                        {% csrf_token %}
+
+                        <div class="mb-3">
+                            <label class="form-label">Username</label>
+                            {{ form.username }}
+                        </div>
+
+                        <div class="mb-3 position-relative">
+                            <label class="form-label">Password</label>
+                            {{ form.password }}
+                            <span class="position-absolute top-50 end-0 me-3"
+                                  style="cursor:pointer"
+                                  onclick="togglePassword()">
+                                👁
+                            </span>
+                        </div>
+
+                        <div class="mb-3 form-check">
+                            {{ form.remember_me }}
+                            <label class="form-check-label">Remember Me</label>
+                        </div>
+
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary btn-lg">
+                                Login
+                            </button>
+                        </div>
+                    </form>
+
+                    <p class="text-center mt-3">
+                        Don't have an account?
+                        <a href="{% url 'customerregistration' %}">Register</a>
+                    </p>
+
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function togglePassword() {
+    const field = document.getElementById("loginPassword");
+    field.type = field.type === "password" ? "text" : "password";
+}
+</script>
+{% endblock main-content %}
