@@ -2,8 +2,11 @@ from django.db.models import Count as Count
 from django.shortcuts import render
 from django.views import View
 from .models import Product
-from .forms import CustomerRegistrationForm
+from .forms import CustomerRegistrationForm , CustomerProfileForm
 from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.utils.decorators import method_decorator
 
 def home(request):
     return render(request, 'app/home.html')
@@ -43,3 +46,17 @@ class CustomerRegistrationView(View):
         else:
             msg = "Form is not valid"
         return render(request, 'app/customerregistration.html', locals())
+    
+class ProfileView(LoginRequiredMixin, View):
+    def get(self, request):
+        form = CustomerProfileForm()
+        return render(request, 'app/profile.html', {'form': form})
+
+    def post(self, request):
+        form = CustomerProfileForm(request.POST)
+        if form.is_valid():
+            customer = form.save(commit=False)
+            customer.user = request.user
+            customer.save()
+            messages.success(request, "Profile updated successfully")
+        return render(request, 'app/profile.html', {'form': form})

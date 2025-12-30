@@ -1,7 +1,8 @@
 from django import forms
-from django.contrib.auth.forms import AuthenticationForm, UsernameField, PasswordResetForm, SetPasswordForm
+from django.contrib.auth.forms import AuthenticationForm, UsernameField, PasswordChangeForm, SetPasswordForm
 from django.contrib.auth.models import User
 from django.contrib.auth.forms import UserCreationForm
+from .models import Customer
 
 
 # ================= LOGIN FORM =================
@@ -43,7 +44,7 @@ class CustomerRegistrationForm(UserCreationForm):
         model = User
         fields = ['username', 'email', 'first_name', 'last_name']
         
-class MyPasswordResetForm(PasswordResetForm):
+class MyPasswordResetForm(PasswordChangeForm):
       email = forms.EmailField(
           max_length=254,
           widget=forms.EmailInput(attrs={'class': 'form-control', 'placeholder': 'Email', 'id': 'resetEmail'})
@@ -58,4 +59,16 @@ class MySetPasswordForm(SetPasswordForm):
         widget=forms.PasswordInput(attrs={'class': 'form-control', 'placeholder': 'Confirm New Password', 'id': 'newPassword2'})
     )   
     
+class CustomerProfileForm(forms.ModelForm):
+    class Meta:
+        model = Customer
+        fields = ['name', 'locality', 'city', 'mobile', 'zipcode', 'state']
+        widgets = {
+            'name': forms.TextInput(attrs={'class': 'form-control'}),
+            'locality': forms.TextInput(attrs={'class': 'form-control'}),
+            'city': forms.TextInput(attrs={'class': 'form-control'}),
+            'mobile': forms.NumberInput(attrs={'class': 'form-control'}),
+            'zipcode': forms.NumberInput(attrs={'class': 'form-control'}),
+            'state': forms.Select(attrs={'class': 'form-control'})
+        }
           

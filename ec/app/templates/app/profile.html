@@ -1,0 +1,56 @@
+{% extends "app/base.html" %}
+{% load static %}
+
+{% block title %}Profile{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row">
+
+        <!-- LEFT SIDEBAR -->
+        <div class="col-sm-3">
+            <h4 class="mb-3">
+                Welcome <span class="text-primary">{{ request.user.username|capfirst }}</span>
+            </h4>
+            <div class="list-group">
+                <a href="{% url 'profile' %}" class="list-group-item list-group-item-action active">
+                    Profile
+                </a>
+                <a href="{% url 'address' %}" class="list-group-item list-group-item-action">
+                    Address
+                </a>
+            </div>
+        </div>
+
+        <!-- RIGHT FORM -->
+        <div class="col-sm-8 offset-sm-1">
+            <form method="post" novalidate class="shadow p-4 rounded bg-white">
+                {% csrf_token %}
+
+                {% for fm in form %}
+                    <div class="mb-3">
+                        {{ fm.label_tag }}
+                        {{ fm }}
+                        <small class="text-danger">
+                            {{ fm.errors|striptags }}
+                        </small>
+                    </div>
+                {% endfor %}
+
+                <button type="submit" class="btn btn-primary">
+                    Submit
+                </button>
+
+                {% if messages %}
+                    {% for msg in messages %}
+                        <div class="alert alert-{{ msg.tags }} mt-3">
+                            {{ msg }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            </form>
+        </div>
+
+    </div>
+</div>
+{% endblock main-content %}
