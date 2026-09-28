@@ -11,8 +11,10 @@
 
                     <h3 class="text-center mb-4 fw-bold">Create Account</h3>
 
-                    {% if msg %}
-                        <div class="alert alert-success text-center">{{ msg }}</div>
+                    {% if messages %}
+                        {% for message in messages %}
+                            <div class="alert alert-{{ message.tags }} text-center">{{ message }}</div>
+                        {% endfor %}
                     {% endif %}
 
                     <form method="post" novalidate>

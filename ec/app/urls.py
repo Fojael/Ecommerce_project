@@ -17,12 +17,12 @@ urlpatterns = [
     path('product-detail/<int:pk>', views.ProductDetail.as_view(), name='product-detail'),
     path('category-title/<val>', views.CategoryTitle.as_view(), name='category-title'),
     path('profile/', views.ProfileView.as_view(), name='profile'),
-    path('address/', views.ProfileView.as_view(), name='address'),
+    path('address/', views.AddressView.as_view(), name='address'),
     
-    
-    #login authentication
+    # login authentication
     path('customerregistration/', views.CustomerRegistrationView.as_view(), name='customerregistration'),
-    path('accounts/login/', auth_views.LoginView.as_view(template_name='app/login.html', authentication_form=LoginForm), name='login'),
+    path('accounts/login/', views.CustomLoginView.as_view(), name='login'),
+    path('logout/', auth_views.LogoutView.as_view(next_page='login'), name='logout'),
     path('password-reset/', auth_views.PasswordResetView.as_view(template_name='app/password_reset.html'), name='password_reset'),
     path('password-reset/done/', auth_views.PasswordResetDoneView.as_view(template_name='app/password_reset_done.html'), name='password_reset_done'),
     path('password-reset-confirm/<uidb64>/<token>/', auth_views.PasswordResetConfirmView.as_view(template_name='app/password_reset_confirm.html'), name='password_reset_confirm'),

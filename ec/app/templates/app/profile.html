@@ -26,6 +26,15 @@
         <div class="col-sm-8 offset-sm-1">
             <form method="post" novalidate class="shadow p-4 rounded bg-white">
                 {% csrf_token %}
+                <h3 class="mb-4">Profile Information</h3>
+
+                {% if messages %}
+                    {% for msg in messages %}
+                        <div class="alert alert-{{ msg.tags }} mb-3">
+                            {{ msg }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
 
                 {% for fm in form %}
                     <div class="mb-3">
@@ -38,16 +47,8 @@
                 {% endfor %}
 
                 <button type="submit" class="btn btn-primary">
-                    Submit
+                    Save Profile
                 </button>
-
-                {% if messages %}
-                    {% for msg in messages %}
-                        <div class="alert alert-{{ msg.tags }} mt-3">
-                            {{ msg }}
-                        </div>
-                    {% endfor %}
-                {% endif %}
             </form>
         </div>
 

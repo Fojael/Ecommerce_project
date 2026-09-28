@@ -1,0 +1,82 @@
+{% extends "app/base.html" %}
+{% load static %}
+
+{% block title %}Address{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row">
+
+        <!-- LEFT SIDEBAR -->
+        <div class="col-sm-3">
+            <h4 class="mb-3">
+                Welcome <span class="text-primary">{{ request.user.username|capfirst }}</span>
+            </h4>
+            <div class="list-group">
+                <a href="{% url 'profile' %}" class="list-group-item list-group-item-action">
+                    Profile
+                </a>
+                <a href="{% url 'address' %}" class="list-group-item list-group-item-action active">
+                    Address
+                </a>
+            </div>
+        </div>
+
+        <!-- RIGHT CONTENT -->
+        <div class="col-sm-8 offset-sm-1">
+            <div class="shadow p-4 rounded bg-white">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h3 class="mb-0">Shipping Address</h3>
+                    {% if customer %}
+                    <a href="{% url 'profile' %}" class="btn btn-outline-primary btn-sm">Edit Address</a>
+                    {% endif %}
+                </div>
+
+                {% if messages %}
+                    {% for msg in messages %}
+                        <div class="alert alert-{{ msg.tags }} mb-3">
+                            {{ msg }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+
+                {% if customer %}
+                    <div class="card border-success mb-3">
+                        <div class="card-header bg-success text-white fw-bold">
+                            Default Address
+                        </div>
+                        <div class="card-body">
+                            <h5 class="card-title fw-bold text-dark">{{ customer.name }}</h5>
+                            <p class="card-text mb-1">
+                                <strong>Mobile:</strong> {{ customer.mobile }}
+                            </p>
+                            <p class="card-text mb-1">
+                                <strong>Locality:</strong> {{ customer.locality }}
+                            </p>
+                            <p class="card-text mb-1">
+                                <strong>City:</strong> {{ customer.city }}
+                            </p>
+                            <p class="card-text mb-1">
+                                <strong>Division / State:</strong> {{ customer.state }}
+                            </p>
+                            <p class="card-text mb-1">
+                                <strong>Zip Code:</strong> {{ customer.zipcode }}
+                            </p>
+                        </div>
+                        <div class="card-footer bg-transparent">
+                            <a href="{% url 'profile' %}" class="btn btn-primary btn-sm">Update Address</a>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-info text-center p-4">
+                        <h5>No Address Found</h5>
+                        <p class="text-muted">You haven't added an address yet. Please complete your profile to set your shipping address.</p>
+                        <a href="{% url 'profile' %}" class="btn btn-primary mt-2">Complete Profile &amp; Add Address</a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+
+    </div>
+</div>
+{% endblock main-content %}
