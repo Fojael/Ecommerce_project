@@ -1,0 +1,145 @@
+{% extends "app/base.html" %}
+{% load static %}
+{% block title %}Order Confirmation - {{ order.order_number }}{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="text-center mb-5">
+        <div class="display-5 text-success mb-2">&#10004;</div>
+        <h2 class="fw-bold">Thank You for Your Order!</h2>
+        <p class="text-muted fs-5">Your order has been placed successfully.</p>
+        <div class="badge bg-dark fs-6 px-3 py-2">Order # {{ order.order_number }}</div>
+    </div>
+
+    <div class="row">
+        <!-- Order Details & Shipping Snapshot -->
+        <div class="col-lg-7">
+            <!-- Order Information Card -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-light py-3">
+                    <h5 class="mb-0 fw-bold">Order Details</h5>
+                </div>
+                <div class="card-body p-4">
+                    <div class="row mb-3">
+                        <div class="col-sm-4 mb-2 mb-sm-0">
+                            <span class="text-muted d-block small">Order Date:</span>
+                            <span class="fw-semibold">{{ order.created_at|date:"F d, Y, h:i A" }}</span>
+                        </div>
+                        <div class="col-sm-4 col-6">
+                            <span class="text-muted d-block small">Order Status:</span>
+                            <span class="badge bg-info text-dark">{{ order.get_status_display }}</span>
+                        </div>
+                        <div class="col-sm-4 col-6">
+                            <span class="text-muted d-block small">Payment Status:</span>
+                            <span class="badge bg-warning text-dark">{{ order.get_payment_status_display }}</span>
+                        </div>
+                    </div>
+                    {% if payment %}
+                    <div class="row pt-2 border-top">
+                        <div class="col-sm-4 col-6">
+                            <span class="text-muted d-block small">Payment Method:</span>
+                            <span class="fw-semibold text-dark">{{ payment.get_payment_method_display }}</span>
+                        </div>
+                        <div class="col-sm-8 col-6">
+                            <span class="text-muted d-block small">Transaction ID:</span>
+                            <span class="font-monospace small">{{ payment.transaction_id }}</span>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Historical Shipping Address Snapshot Card -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-light py-3">
+                    <h5 class="mb-0 fw-bold">Shipping Address (Snapshot)</h5>
+                </div>
+                <div class="card-body p-4">
+                    <h6 class="fw-bold text-dark">{{ order.shipping_name }}</h6>
+                    <p class="mb-1"><strong>Mobile:</strong> {{ order.shipping_mobile }}</p>
+                    <p class="mb-1"><strong>Locality:</strong> {{ order.shipping_locality }}</p>
+                    <p class="mb-1"><strong>City:</strong> {{ order.shipping_city }}</p>
+                    <p class="mb-1"><strong>Division / State:</strong> {{ order.shipping_state }}</p>
+                    <p class="mb-0"><strong>Zip Code:</strong> {{ order.shipping_zipcode }}</p>
+                </div>
+            </div>
+
+            <!-- Items Ordered -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-light py-3">
+                    <h5 class="mb-0 fw-bold">Items Ordered</h5>
+                </div>
+                <div class="card-body p-4">
+                    <div class="table-responsive">
+                        <table class="table table-borderless align-middle mb-0">
+                            <thead class="border-bottom text-muted small">
+                                <tr>
+                                    <th>Product</th>
+                                    <th class="text-center">Unit Price</th>
+                                    <th class="text-center">Quantity</th>
+                                    <th class="text-end">Subtotal</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in order_items %}
+                                <tr class="{% if not forloop.last %}border-bottom{% endif %}">
+                                    <td>
+                                        <span class="fw-bold text-dark">{{ item.product_name }}</span>
+                                    </td>
+                                    <td class="text-center">৳ {{ item.unit_price }}</td>
+                                    <td class="text-center">{{ item.quantity }}</td>
+                                    <td class="text-end fw-bold text-success">৳ {{ item.subtotal }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary & Actions -->
+        <div class="col-lg-5 mt-4 mt-lg-0">
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-success text-white py-3">
+                    <h5 class="mb-0 fw-bold">Payment Summary</h5>
+                </div>
+                <div class="card-body p-4">
+                    <div class="d-flex justify-content-between mb-2">
+                        <span>Items Subtotal</span>
+                        <span class="fw-bold">৳ {{ order.subtotal }}</span>
+                    </div>
+
+                    {% if order.total_discount > 0 %}
+                    <div class="d-flex justify-content-between mb-2 text-success">
+                        <span>Total Savings</span>
+                        <span class="fw-semibold">- ৳ {{ order.total_discount }}</span>
+                    </div>
+                    {% endif %}
+
+                    <div class="d-flex justify-content-between mb-3">
+                        <span>Delivery Charge</span>
+                        <span class="fw-bold">৳ {{ order.delivery_charge }}</span>
+                    </div>
+
+                    <hr>
+
+                    <div class="d-flex justify-content-between mb-4 fs-5">
+                        <span class="fw-bold">Grand Total</span>
+                        <span class="fw-bold text-success">৳ {{ order.grand_total }}</span>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <a href="{% url 'orders' %}" class="btn btn-primary btn-lg">
+                            View My Orders
+                        </a>
+                        <a href="{% url 'home' %}" class="btn btn-outline-secondary">
+                            Continue Shopping
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock main-content %}

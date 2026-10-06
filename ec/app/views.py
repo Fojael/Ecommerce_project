@@ -1,10 +1,27 @@
+import logging
+from decimal import Decimal
+from django.db import transaction
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views import View
+
+logger = logging.getLogger(__name__)
 from django.contrib import messages
 from django.contrib.auth import views as auth_views
 from django.contrib.auth.mixins import LoginRequiredMixin
-from .models import Product, Customer, Cart, CartItem
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse, HttpResponseNotAllowed
+from .models import Product, Customer, Cart, CartItem, Order, OrderItem, Payment
 from .forms import CustomerRegistrationForm, CustomerProfileForm, LoginForm
+from .services.sslcommerz import initiate_sslcommerz_payment, validate_sslcommerz_transaction
+from .services.payment import (
+    create_payment,
+    process_validated_payment,
+    process_failed_payment,
+    process_cancelled_payment,
+)
+
+
 
 def home(request):
     return render(request, 'app/home.html')
@@ -190,3 +207,290 @@ class RemoveCartView(LoginRequiredMixin, View):
             if cart_item:
                 cart_item.delete()
         return redirect('show-cart')
+
+
+class CheckoutView(LoginRequiredMixin, View):
+    def get(self, request):
+        customer = Customer.objects.filter(user=request.user).first()
+        if not customer or not customer.name or not customer.locality or not customer.city or not customer.mobile or not customer.state:
+            messages.warning(request, "Please complete your shipping address before proceeding to checkout.")
+            return redirect('profile')
+
+        cart = Cart.objects.filter(user=request.user).first()
+        cart_items = list(cart.items.select_related('product').all()) if cart else []
+        if not cart_items:
+            messages.warning(request, "Your cart is empty. Please add items before checking out.")
+            return redirect('show-cart')
+
+        subtotal = Decimal('0.00')
+        total_discount = Decimal('0.00')
+        delivery_charge = Decimal('70.00')
+
+        for item in cart_items:
+            sp = Decimal(str(item.product.selling_price))
+            dp = Decimal(str(item.product.discounted_price))
+            subtotal += dp * item.quantity
+            total_discount += (sp - dp) * item.quantity
+
+        grand_total = subtotal + delivery_charge
+
+        return render(request, 'app/checkout.html', {
+            'cart': cart,
+            'cart_items': cart_items,
+            'customer': customer,
+            'subtotal': subtotal,
+            'total_discount': total_discount,
+            'delivery_charge': delivery_charge,
+            'grand_total': grand_total,
+        })
+
+
+class PlaceOrderView(LoginRequiredMixin, View):
+    def get(self, request):
+        return redirect('checkout')
+
+    def post(self, request):
+        customer = Customer.objects.filter(user=request.user).first()
+        if not customer or not customer.name or not customer.locality or not customer.city or not customer.mobile or not customer.state:
+            messages.warning(request, "Incomplete shipping address. Please update your profile.")
+            return redirect('profile')
+
+        with transaction.atomic():
+            cart = Cart.objects.select_for_update().filter(user=request.user).first()
+            cart_items = list(cart.items.select_related('product').all()) if cart else []
+            if not cart_items:
+                messages.warning(request, "Your cart is empty.")
+                return redirect('show-cart')
+
+            subtotal = Decimal('0.00')
+            total_discount = Decimal('0.00')
+            delivery_charge = Decimal('70.00')
+            order_items_data = []
+
+            for item in cart_items:
+                if item.quantity <= 0:
+                    messages.error(request, "Invalid item quantity in cart.")
+                    return redirect('show-cart')
+                product = Product.objects.get(id=item.product.id)
+                sp = Decimal(str(product.selling_price))
+                dp = Decimal(str(product.discounted_price))
+                item_subtotal = dp * item.quantity
+                item_discount = (sp - dp) * item.quantity
+                subtotal += item_subtotal
+                total_discount += item_discount
+                order_items_data.append({
+                    'product': product,
+                    'product_name': product.title,
+                    'unit_price': dp,
+                    'quantity': item.quantity,
+                    'subtotal': item_subtotal,
+                })
+
+            grand_total = subtotal + delivery_charge
+
+            order = Order.objects.create(
+                user=request.user,
+                shipping_name=customer.name,
+                shipping_mobile=customer.mobile,
+                shipping_locality=customer.locality,
+                shipping_city=customer.city,
+                shipping_zipcode=str(customer.zipcode),
+                shipping_state=customer.state,
+                subtotal=subtotal,
+                total_discount=total_discount,
+                delivery_charge=delivery_charge,
+                grand_total=grand_total,
+                status='PENDING',
+                payment_status='PENDING',
+            )
+
+            for oi in order_items_data:
+                OrderItem.objects.create(
+                    order=order,
+                    product=oi['product'],
+                    product_name=oi['product_name'],
+                    unit_price=oi['unit_price'],
+                    quantity=oi['quantity'],
+                    subtotal=oi['subtotal'],
+                )
+
+            # Create payment record (COD or SSLCOMMERZ)
+            payment_method = request.POST.get('payment_method', 'COD').upper()
+            if payment_method not in ('COD', 'SSLCOMMERZ'):
+                payment_method = 'COD'
+            payment = create_payment(order, payment_method=payment_method)
+
+            # Clear cart only after successful order and order items creation
+            cart.items.all().delete()
+
+        if payment_method == 'SSLCOMMERZ':
+            initiate_result = initiate_sslcommerz_payment(payment, request)
+            if initiate_result.get('success'):
+                return redirect(initiate_result['gateway_url'])
+            else:
+                process_failed_payment(payment.transaction_id, reason=initiate_result.get('error'))
+                messages.error(
+                    request,
+                    f"Order #{order.order_number} created, but online payment initiation failed: {initiate_result.get('error')}. You can retry payment from order details."
+                )
+                return redirect('order-detail', pk=order.pk)
+
+        # COD flow
+        messages.success(request, f"Order #{order.order_number} placed successfully with Cash on Delivery!")
+        return redirect('order-confirmation', pk=order.pk)
+
+
+class OrderConfirmationView(LoginRequiredMixin, View):
+    def get(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        order_items = order.items.select_related('product').all()
+        payment = order.payments.order_by('-created_at').first()
+        return render(request, 'app/order_confirmation.html', {
+            'order': order,
+            'order_items': order_items,
+            'payment': payment,
+        })
+
+
+class OrderListView(LoginRequiredMixin, View):
+    def get(self, request):
+        orders = Order.objects.filter(user=request.user).order_by('-created_at')
+        return render(request, 'app/orders.html', {
+            'orders': orders,
+        })
+
+
+class OrderDetailView(LoginRequiredMixin, View):
+    def get(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        order_items = order.items.select_related('product').all()
+        payments = order.payments.all().order_by('-created_at')
+        return render(request, 'app/order_detail.html', {
+            'order': order,
+            'order_items': order_items,
+            'payments': payments,
+        })
+
+
+class SSLCommerzInitiateView(LoginRequiredMixin, View):
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, pk=order_id, user=request.user)
+        if order.payment_status == 'PAID':
+            messages.info(request, "This order is already paid.")
+            return redirect('order-detail', pk=order.pk)
+
+        payment = create_payment(order, payment_method='SSLCOMMERZ')
+        initiate_result = initiate_sslcommerz_payment(payment, request)
+
+        if initiate_result.get('success'):
+            return redirect(initiate_result['gateway_url'])
+        else:
+            process_failed_payment(payment.transaction_id, reason=initiate_result.get('error'))
+            messages.error(
+                request,
+                f"Online payment initiation failed: {initiate_result.get('error')}. Please try again."
+            )
+            return redirect('order-detail', pk=order.pk)
+
+    def get(self, request, order_id):
+        return HttpResponseNotAllowed(['POST'])
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SSLCommerzSuccessView(View):
+    def post(self, request):
+        val_id = request.POST.get('val_id') or request.GET.get('val_id')
+        tran_id = request.POST.get('tran_id') or request.GET.get('tran_id')
+
+        if not val_id:
+            messages.error(request, "Invalid payment response: missing validation ID.")
+            return redirect('orders')
+
+        val_data = validate_sslcommerz_transaction(val_id)
+        val_tran_id = val_data.get('tran_id')
+
+        # Defensive consistency check: verify request tran_id matches gateway-validated tran_id
+        if tran_id and val_tran_id and tran_id != val_tran_id:
+            logger.warning(
+                f"Tran_id mismatch in success callback: request={tran_id}, validated={val_tran_id}"
+            )
+            messages.error(request, "Transaction validation verification failed.")
+            payment = Payment.objects.filter(transaction_id=tran_id).first()
+            if payment:
+                return redirect('order-detail', pk=payment.order.pk)
+            return redirect('orders')
+
+        success, result = process_validated_payment(val_data)
+
+        if success:
+            order = result.order
+            messages.success(request, f"Payment successful for Order #{order.order_number}!")
+            return redirect('order-confirmation', pk=order.pk)
+        else:
+            payment = Payment.objects.filter(transaction_id=tran_id or val_tran_id).first()
+            messages.error(request, f"Payment validation failed: {result}")
+            if payment:
+                return redirect('order-detail', pk=payment.order.pk)
+            return redirect('orders')
+
+    def get(self, request):
+        return self.post(request)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SSLCommerzFailView(View):
+    def post(self, request):
+        tran_id = request.POST.get('tran_id') or request.GET.get('tran_id')
+        reason = request.POST.get('error') or request.POST.get('failedreason', 'Payment failed')
+        payment = process_failed_payment(tran_id, reason=reason)
+        messages.error(request, f"Payment failed: {reason}. You can retry paying online.")
+        if payment:
+            return redirect('order-detail', pk=payment.order.pk)
+        return redirect('orders')
+
+    def get(self, request):
+        return self.post(request)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SSLCommerzCancelView(View):
+    def post(self, request):
+        tran_id = request.POST.get('tran_id') or request.GET.get('tran_id')
+        payment = process_cancelled_payment(tran_id)
+        messages.warning(request, "Payment was cancelled. You can retry paying online anytime.")
+        if payment:
+            return redirect('order-detail', pk=payment.order.pk)
+        return redirect('orders')
+
+    def get(self, request):
+        return self.post(request)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SSLCommerzIPNView(View):
+    def post(self, request):
+        val_id = request.POST.get('val_id')
+        tran_id = request.POST.get('tran_id')
+
+        if not val_id:
+            return HttpResponse("Missing val_id parameter", status=400)
+
+        val_data = validate_sslcommerz_transaction(val_id)
+        val_tran_id = val_data.get('tran_id')
+
+        if tran_id and val_tran_id and tran_id != val_tran_id:
+            logger.warning(
+                f"IPN tran_id mismatch: request={tran_id}, validated={val_tran_id}"
+            )
+            return HttpResponse("Transaction ID mismatch", status=400)
+
+        success, result = process_validated_payment(val_data)
+
+        if success:
+            return HttpResponse("IPN Processed Successfully", status=200)
+        else:
+            return HttpResponse(f"Validation failed: {result}", status=400)
+
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+

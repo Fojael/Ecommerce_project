@@ -2,39 +2,46 @@
 {% load static %}
 {% block title %}Category{% endblock title %}
 {% block main-content %}
-    <div class="container my-5">
-        <div class="row">
-            <div class="col-sm-3">
-                <div class="list-group">
-                 
+<div class="container my-5">
+    <div class="row">
+        <div class="col-sm-3 mb-4">
+            <div class="list-group">
                 {% for val in title %}
-
-                  <a href="{% url 'category-title' val.title %}" class="list-group-item list-group-item-action " aria-current="true">
-                    {{ val.title }}</a>
-             
+                <a href="{% url 'category-title' val.title %}" class="list-group-item list-group-item-action" aria-current="true">
+                    {{ val.title }}
+                </a>
                 {% endfor %}
-                </div>
             </div>
-        <div class="col-sm-9"></div>
+        </div>
+
+        <div class="col-sm-9">
             <div class="row">
                 {% for prod in product %}
-                <div class="col text-center mb-4">
-                    <a href="{% url 'product-detail' prod.id %}"class="btn">
-                        <div>
-                            <img src="{{ prod.product_image.url }}" width="300px" height="200px" />
-                            <div class="fw-bold">{{ prod.title }}</div>
-                            <div class="fw-bold text-danger">
-                                Rs.{{ prod.discounted_price }}/-
-                                <small class="fw-light text-decoration-line-through">
-                                    {{ prod.selling_price }}
-
-                    </a>
-                                </small>
+                <div class="col-md-4 col-sm-6 text-center mb-4">
+                    <a href="{% url 'product-detail' prod.id %}" class="btn text-decoration-none text-dark w-100">
+                        <div class="card h-100 p-2 shadow-sm border-0">
+                            <img src="{% if prod.product_image %}{{ prod.product_image.url }}{% endif %}" class="card-img-top mx-auto" style="height: 180px; width: 100%; object-fit: contain;" alt="{{ prod.title }}" />
+                            <div class="card-body p-2">
+                                <div class="fw-bold">{{ prod.title }}</div>
+                                <div class="fw-bold text-danger">
+                                    ৳ {{ prod.discounted_price }}
+                                    {% if prod.selling_price > prod.discounted_price %}
+                                    <small class="fw-light text-decoration-line-through text-muted ms-1">
+                                        ৳ {{ prod.selling_price }}
+                                    </small>
+                                    {% endif %}
+                                </div>
+                            </div>
                         </div>
-                       
-                    </div>
+                    </a>
+                </div>
+                {% empty %}
+                <div class="col-12 text-center py-5">
+                    <p class="text-muted">No products available in this category.</p>
                 </div>
                 {% endfor %}
             </div>
-        </div>     
+        </div>
+    </div>
+</div>
 {% endblock main-content %}

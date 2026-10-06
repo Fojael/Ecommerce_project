@@ -1,0 +1,98 @@
+{% extends "app/base.html" %}
+{% load static %}
+{% block title %}My Orders{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row">
+        <!-- LEFT SIDEBAR -->
+        <div class="col-sm-3 mb-4">
+            <h4 class="mb-3">
+                Welcome <span class="text-primary">{{ request.user.username|capfirst }}</span>
+            </h4>
+            <div class="list-group">
+                <a href="{% url 'profile' %}" class="list-group-item list-group-item-action">
+                    Profile
+                </a>
+                <a href="{% url 'address' %}" class="list-group-item list-group-item-action">
+                    Address
+                </a>
+                <a href="{% url 'orders' %}" class="list-group-item list-group-item-action active">
+                    My Orders
+                </a>
+            </div>
+        </div>
+
+        <!-- RIGHT CONTENT: Orders List -->
+        <div class="col-sm-9">
+            <div class="shadow-sm p-4 rounded bg-white">
+                <div class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom">
+                    <h3 class="mb-0 fw-bold">Order History</h3>
+                    <span class="text-muted">{{ orders|length }} order{{ orders|length|pluralize }} placed</span>
+                </div>
+
+                {% if messages %}
+                    {% for msg in messages %}
+                        <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-3" role="alert">
+                            {{ msg }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+
+                {% if orders %}
+                    {% for order in orders %}
+                    <div class="card mb-4 border shadow-sm">
+                        <div class="card-header bg-light d-flex flex-wrap justify-content-between align-items-center py-3">
+                            <div class="me-3 mb-2 mb-sm-0">
+                                <span class="text-muted small d-block">Order Placed</span>
+                                <span class="fw-semibold text-dark">{{ order.created_at|date:"F d, Y" }}</span>
+                            </div>
+                            <div class="me-3 mb-2 mb-sm-0">
+                                <span class="text-muted small d-block">Total Amount</span>
+                                <span class="fw-bold text-success">৳ {{ order.grand_total }}</span>
+                            </div>
+                            <div class="me-3 mb-2 mb-sm-0">
+                                <span class="text-muted small d-block">Order Number</span>
+                                <span class="fw-bold text-dark">{{ order.order_number }}</span>
+                            </div>
+                            <div class="text-end">
+                                <a href="{% url 'order-detail' order.id %}" class="btn btn-outline-primary btn-sm">
+                                    View Details
+                                </a>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="row align-items-center">
+                                <div class="col-md-7 mb-3 mb-md-0">
+                                    <div class="d-flex flex-wrap gap-2 mb-2">
+                                        <span class="badge bg-info text-dark">Status: {{ order.get_status_display }}</span>
+                                        <span class="badge bg-warning text-dark">Payment: {{ order.get_payment_status_display }}</span>
+                                    </div>
+                                    <p class="text-muted small mb-0">
+                                        <strong>Ship To:</strong> {{ order.shipping_name }} ({{ order.shipping_city }}, {{ order.shipping_state }})
+                                    </p>
+                                </div>
+                                <div class="col-md-5 text-md-end">
+                                    <span class="text-muted small">
+                                        {{ order.items.count }} item{{ order.items.count|pluralize }}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="text-center py-5">
+                        <h4 class="fw-bold">No Orders Yet</h4>
+                        <p class="text-muted">You have not placed any orders yet.</p>
+                        <a href="{% url 'home' %}" class="btn btn-success mt-2">
+                            Start Shopping
+                        </a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock main-content %}

@@ -19,6 +19,27 @@ urlpatterns = [
     path('profile/', views.ProfileView.as_view(), name='profile'),
     path('address/', views.AddressView.as_view(), name='address'),
     
+    # Cart URLs
+    path('add-to-cart/', views.AddToCartView.as_view(), name='add-to-cart'),
+    path('cart/', views.ShowCartView.as_view(), name='show-cart'),
+    path('plus-cart/', views.PlusCartView.as_view(), name='plus-cart'),
+    path('minus-cart/', views.MinusCartView.as_view(), name='minus-cart'),
+    path('remove-cart/', views.RemoveCartView.as_view(), name='remove-cart'),
+    
+    # Checkout & Order URLs
+    path('checkout/', views.CheckoutView.as_view(), name='checkout'),
+    path('place-order/', views.PlaceOrderView.as_view(), name='place-order'),
+    path('orders/', views.OrderListView.as_view(), name='orders'),
+    path('orders/<int:pk>/', views.OrderDetailView.as_view(), name='order-detail'),
+    path('orders/<int:pk>/confirmation/', views.OrderConfirmationView.as_view(), name='order-confirmation'),
+
+    # Payment URLs
+    path('payments/sslcommerz/initiate/<int:order_id>/', views.SSLCommerzInitiateView.as_view(), name='sslcommerz-initiate'),
+    path('payments/sslcommerz/success/', views.SSLCommerzSuccessView.as_view(), name='sslcommerz-success'),
+    path('payments/sslcommerz/fail/', views.SSLCommerzFailView.as_view(), name='sslcommerz-fail'),
+    path('payments/sslcommerz/cancel/', views.SSLCommerzCancelView.as_view(), name='sslcommerz-cancel'),
+    path('payments/sslcommerz/ipn/', views.SSLCommerzIPNView.as_view(), name='sslcommerz-ipn'),
+    
     # login authentication
     path('customerregistration/', views.CustomerRegistrationView.as_view(), name='customerregistration'),
     path('accounts/login/', views.CustomLoginView.as_view(), name='login'),
