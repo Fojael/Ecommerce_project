@@ -19,6 +19,16 @@
                 {% endif %}
             </h4>
 
+            <div class="my-3">
+                {% if product.is_out_of_stock %}
+                <span class="badge bg-danger fs-6 py-2 px-3">Out of Stock</span>
+                {% elif product.is_low_stock %}
+                <span class="badge bg-warning text-dark fs-6 py-2 px-3">Only {{ product.stock }} left in stock - order soon!</span>
+                {% else %}
+                <span class="badge bg-success fs-6 py-2 px-3">In Stock ({{ product.stock }} available)</span>
+                {% endif %}
+            </div>
+
             <div class="mt-4">
                 <h4>Product Features:</h4>
                 <p class="fs-5 text-muted" style="font-family: Rajdhani;">
@@ -36,14 +46,16 @@
                             <label for="quantityInput" class="fw-bold fs-5">Quantity:</label>
                         </div>
                         <div class="col-auto">
-                            <input type="number" id="quantityInput" name="quantity" value="1" min="1" max="100" class="form-control" style="width: 80px;">
+                            <input type="number" id="quantityInput" name="quantity" value="1" min="1" max="{{ product.stock|default:1 }}" class="form-control" style="width: 80px;" {% if product.is_out_of_stock %}disabled{% endif %}>
                         </div>
                     </div>
 
-                    <button type="submit" class="btn btn-danger btn-lg me-2 text-white">
-                        Add to Cart
+                    <button type="submit" class="btn btn-danger btn-lg me-2 text-white" {% if product.is_out_of_stock %}disabled{% endif %}>
+                        {% if product.is_out_of_stock %}Out of Stock{% else %}Add to Cart{% endif %}
                     </button>
+                    {% if not product.is_out_of_stock %}
                     <a href="#" class="btn btn-dark btn-lg text-white">Buy Now</a>
+                    {% endif %}
                 </form>
             </div>
         </div>

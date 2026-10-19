@@ -93,6 +93,10 @@ def process_validated_payment(val_data):
         order.payment_status = 'PAID'
         order.save(update_fields=['payment_status', 'updated_at'])
 
+        from app.services.notification import notify_payment_confirmed
+        payment_to_notify = payment
+        transaction.on_commit(lambda: notify_payment_confirmed(payment_to_notify))
+
         logger.info(f"Payment {tran_id} and Order {order.order_number} marked as PAID")
         return True, payment
 
@@ -112,6 +116,11 @@ def process_failed_payment(tran_id, reason=''):
             if order.payment_status != 'PAID':
                 order.payment_status = 'FAILED'
                 order.save(update_fields=['payment_status', 'updated_at'])
+
+            from app.services.notification import notify_payment_failed
+            payment_to_notify = payment
+            reason_to_notify = reason
+            transaction.on_commit(lambda: notify_payment_failed(payment_to_notify, reason=reason_to_notify))
         return payment
 
 
@@ -131,4 +140,8 @@ def process_cancelled_payment(tran_id):
             if order.payment_status != 'PAID':
                 order.payment_status = 'PENDING'
                 order.save(update_fields=['payment_status', 'updated_at'])
+
+            from app.services.notification import notify_payment_cancelled
+            payment_to_notify = payment
+            transaction.on_commit(lambda: notify_payment_cancelled(payment_to_notify))
         return payment

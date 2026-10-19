@@ -7,11 +7,21 @@ from django.views import View
 logger = logging.getLogger(__name__)
 from django.contrib import messages
 from django.contrib.auth import views as auth_views
-from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.urls import reverse
+from django.db import models
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from django.http import HttpResponse, HttpResponseNotAllowed
-from .models import Product, Customer, Cart, CartItem, Order, OrderItem, Payment
+from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
+from .models import (
+    Product, Customer, Cart, CartItem, Order, OrderItem, Payment, StockAdjustment, OrderStatusHistory,
+    ORDER_STATUS_CHOICES, Notification
+)
+from .services.notification import (
+    mark_notification_as_read,
+    mark_all_notifications_as_read,
+    get_unread_notifications_count,
+)
 from .forms import CustomerRegistrationForm, CustomerProfileForm, LoginForm
 from .services.sslcommerz import initiate_sslcommerz_payment, validate_sslcommerz_transaction
 from .services.payment import (
@@ -19,6 +29,18 @@ from .services.payment import (
     process_validated_payment,
     process_failed_payment,
     process_cancelled_payment,
+)
+from .services.inventory import (
+    adjust_stock,
+    deduct_order_stock,
+    restore_order_stock,
+    InsufficientStockError,
+)
+from .services.fulfillment import (
+    transition_order_status,
+    can_transition_order,
+    FulfillmentTransitionError,
+    VALID_TRANSITIONS,
 )
 
 
@@ -118,13 +140,26 @@ class AddToCartView(LoginRequiredMixin, View):
         except (TypeError, ValueError):
             qty = 1
 
+        if product.stock <= 0:
+            messages.error(request, f"'{product.title}' is currently out of stock.")
+            return redirect('product-detail', pk=product.id)
+
         cart, _ = Cart.objects.get_or_create(user=request.user)
-        cart_item, created = CartItem.objects.get_or_create(cart=cart, product=product)
-        if not created:
-            cart_item.quantity += qty
-            cart_item.save()
+        cart_item = CartItem.objects.filter(cart=cart, product=product).first()
+        current_qty = cart_item.quantity if cart_item else 0
+        new_total_qty = current_qty + qty
+
+        if new_total_qty > product.stock:
+            messages.error(
+                request,
+                f"Cannot add {qty} item(s). Only {product.stock} available in stock (you already have {current_qty} in your cart)."
+            )
+            return redirect('product-detail', pk=product.id)
+
+        if not cart_item:
+            CartItem.objects.create(cart=cart, product=product, quantity=qty)
         else:
-            cart_item.quantity = qty
+            cart_item.quantity = new_total_qty
             cart_item.save()
         return redirect('show-cart')
 
@@ -135,18 +170,32 @@ class AddToCartView(LoginRequiredMixin, View):
 class ShowCartView(LoginRequiredMixin, View):
     def get(self, request):
         cart = Cart.objects.filter(user=request.user).first()
-        cart_items = cart.items.all().select_related('product') if cart else []
+        cart_items = list(cart.items.all().select_related('product')) if cart else []
         cart_subtotal = 0.0
         total_discount = 0.0
+        has_stock_error = False
+
         for item in cart_items:
             cart_subtotal += item.product.discounted_price * item.quantity
             total_discount += (item.product.selling_price - item.product.discounted_price) * item.quantity
+            if item.quantity > item.product.stock or item.product.stock <= 0:
+                item.stock_error = True
+                has_stock_error = True
+            else:
+                item.stock_error = False
+
+        if has_stock_error:
+            messages.warning(
+                request,
+                "Some items in your cart exceed available stock. Please adjust quantities before proceeding to checkout."
+            )
 
         return render(request, 'app/cart.html', {
             'cart': cart,
             'cart_items': cart_items,
             'cart_subtotal': round(cart_subtotal, 2),
             'total_discount': round(total_discount, 2),
+            'has_stock_error': has_stock_error,
         })
 
 
@@ -157,15 +206,21 @@ class PlusCartView(LoginRequiredMixin, View):
         cart = Cart.objects.filter(user=request.user).first()
         if cart:
             if item_id:
-                cart_item = CartItem.objects.filter(id=item_id, cart=cart).first()
+                cart_item = CartItem.objects.select_related('product').filter(id=item_id, cart=cart).first()
             elif prod_id:
-                cart_item = CartItem.objects.filter(product_id=prod_id, cart=cart).first()
+                cart_item = CartItem.objects.select_related('product').filter(product_id=prod_id, cart=cart).first()
             else:
                 cart_item = None
 
             if cart_item:
-                cart_item.quantity += 1
-                cart_item.save()
+                if cart_item.quantity + 1 > cart_item.product.stock:
+                    messages.warning(
+                        request,
+                        f"Cannot increase quantity. Only {cart_item.product.stock} available in stock for '{cart_item.product.title}'."
+                    )
+                else:
+                    cart_item.quantity += 1
+                    cart_item.save()
         return redirect('show-cart')
 
 
@@ -222,6 +277,15 @@ class CheckoutView(LoginRequiredMixin, View):
             messages.warning(request, "Your cart is empty. Please add items before checking out.")
             return redirect('show-cart')
 
+        # Stock pre-check: block proceeding to checkout if any item exceeds available stock
+        for item in cart_items:
+            if item.product.stock < item.quantity or item.product.stock <= 0:
+                messages.error(
+                    request,
+                    f"'{item.product.title}' has insufficient stock (Requested: {item.quantity}, Available: {item.product.stock}). Please update your cart before checking out."
+                )
+                return redirect('show-cart')
+
         subtotal = Decimal('0.00')
         total_discount = Decimal('0.00')
         delivery_charge = Decimal('70.00')
@@ -262,16 +326,26 @@ class PlaceOrderView(LoginRequiredMixin, View):
                 messages.warning(request, "Your cart is empty.")
                 return redirect('show-cart')
 
+            # Pre-validate stock for every item before creating the order
+            for item in cart_items:
+                if item.quantity <= 0:
+                    messages.error(request, "Invalid item quantity in cart.")
+                    return redirect('show-cart')
+                product = Product.objects.select_for_update().get(id=item.product.id)
+                if product.stock < item.quantity or product.stock <= 0:
+                    messages.error(
+                        request,
+                        f"Cannot place order: '{product.title}' only has {product.stock} available in stock, but your cart has {item.quantity}."
+                    )
+                    return redirect('show-cart')
+
             subtotal = Decimal('0.00')
             total_discount = Decimal('0.00')
             delivery_charge = Decimal('70.00')
             order_items_data = []
 
             for item in cart_items:
-                if item.quantity <= 0:
-                    messages.error(request, "Invalid item quantity in cart.")
-                    return redirect('show-cart')
-                product = Product.objects.get(id=item.product.id)
+                product = Product.objects.select_for_update().get(id=item.product.id)
                 sp = Decimal(str(product.selling_price))
                 dp = Decimal(str(product.discounted_price))
                 item_subtotal = dp * item.quantity
@@ -302,6 +376,8 @@ class PlaceOrderView(LoginRequiredMixin, View):
                 grand_total=grand_total,
                 status='PENDING',
                 payment_status='PENDING',
+                stock_deducted=False,
+                stock_restored=False,
             )
 
             for oi in order_items_data:
@@ -314,6 +390,9 @@ class PlaceOrderView(LoginRequiredMixin, View):
                     subtotal=oi['subtotal'],
                 )
 
+            # Deduct stock atomically and record audit adjustment
+            deduct_order_stock(order, user=request.user)
+
             # Create payment record (COD or SSLCOMMERZ)
             payment_method = request.POST.get('payment_method', 'COD').upper()
             if payment_method not in ('COD', 'SSLCOMMERZ'):
@@ -322,6 +401,19 @@ class PlaceOrderView(LoginRequiredMixin, View):
 
             # Clear cart only after successful order and order items creation
             cart.items.all().delete()
+
+            # Record initial order status history
+            OrderStatusHistory.objects.create(
+                order=order,
+                from_status='PENDING',
+                to_status='PENDING',
+                changed_by=request.user,
+                notes='Order placed'
+            )
+
+            from app.services.notification import notify_order_placed
+            order_to_notify = order
+            transaction.on_commit(lambda: notify_order_placed(order_to_notify))
 
         if payment_method == 'SSLCOMMERZ':
             initiate_result = initiate_sslcommerz_payment(payment, request)
@@ -365,11 +457,149 @@ class OrderDetailView(LoginRequiredMixin, View):
         order = get_object_or_404(Order, pk=pk, user=request.user)
         order_items = order.items.select_related('product').all()
         payments = order.payments.all().order_by('-created_at')
+        status_history = order.status_history.all().order_by('timestamp')
         return render(request, 'app/order_detail.html', {
             'order': order,
             'order_items': order_items,
             'payments': payments,
+            'status_history': status_history,
         })
+
+
+class OrderCancelView(LoginRequiredMixin, View):
+    def post(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        if order.status == 'CANCELLED':
+            messages.info(request, f"Order #{order.order_number} is already cancelled.")
+            return redirect('order-detail', pk=order.pk)
+
+        if order.payment_status == 'PAID':
+            messages.error(request, "Paid orders cannot be cancelled directly. Please contact support.")
+            return redirect('order-detail', pk=order.pk)
+
+        if order.status != 'PENDING':
+            messages.error(request, f"Cannot cancel order with status '{order.get_status_display()}'.")
+            return redirect('order-detail', pk=order.pk)
+
+        try:
+            transition_order_status(
+                order,
+                'CANCELLED',
+                user=request.user,
+                notes='Cancelled by customer via My Orders'
+            )
+            messages.success(request, f"Order #{order.order_number} has been cancelled and stock has been restored.")
+        except FulfillmentTransitionError as e:
+            messages.error(request, str(e))
+
+        return redirect('order-detail', pk=order.pk)
+
+    def get(self, request, pk):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class StaffRequiredMixin(LoginRequiredMixin, UserPassesTestMixin):
+    def test_func(self):
+        return self.request.user.is_authenticated and self.request.user.is_staff
+
+    def handle_no_permission(self):
+        if not self.request.user.is_authenticated:
+            return super().handle_no_permission()
+        messages.error(self.request, "You do not have staff permissions to access fulfillment management.")
+        return redirect('orders')
+
+
+class StaffOrderQueueView(StaffRequiredMixin, View):
+    def get(self, request):
+        status_filter = request.GET.get('status', 'ACTIVE')
+        search_query = request.GET.get('q', '').strip()
+
+        orders = Order.objects.all().select_related('user').prefetch_related('items')
+
+        if status_filter == 'ACTIVE':
+            orders = orders.filter(status__in=['PENDING', 'ACCEPTED', 'PROCESSING', 'READY', 'SHIPPED'])
+        elif status_filter in dict(ORDER_STATUS_CHOICES):
+            orders = orders.filter(status=status_filter)
+
+        if search_query:
+            orders = orders.filter(
+                models.Q(order_number__icontains=search_query) |
+                models.Q(shipping_name__icontains=search_query) |
+                models.Q(shipping_mobile__icontains=search_query) |
+                models.Q(user__username__icontains=search_query)
+            )
+
+        orders = orders.order_by('-created_at')
+
+        counts = {
+            'ACTIVE': Order.objects.filter(status__in=['PENDING', 'ACCEPTED', 'PROCESSING', 'READY', 'SHIPPED']).count(),
+            'PENDING': Order.objects.filter(status='PENDING').count(),
+            'ACCEPTED': Order.objects.filter(status='ACCEPTED').count(),
+            'PROCESSING': Order.objects.filter(status='PROCESSING').count(),
+            'READY': Order.objects.filter(status='READY').count(),
+            'SHIPPED': Order.objects.filter(status='SHIPPED').count(),
+            'DELIVERED': Order.objects.filter(status='DELIVERED').count(),
+            'CANCELLED': Order.objects.filter(status='CANCELLED').count(),
+        }
+
+        return render(request, 'app/staff_orders.html', {
+            'orders': orders,
+            'current_status': status_filter,
+            'search_query': search_query,
+            'counts': counts,
+            'status_choices': ORDER_STATUS_CHOICES,
+        })
+
+
+class StaffOrderDetailView(StaffRequiredMixin, View):
+    def get(self, request, pk):
+        order = get_object_or_404(Order, pk=pk)
+        order_items = order.items.select_related('product').all()
+        payments = order.payments.all().order_by('-created_at')
+        status_history = order.status_history.all().order_by('timestamp')
+        next_statuses = list(VALID_TRANSITIONS.get(order.status, set()))
+
+        return render(request, 'app/staff_order_detail.html', {
+            'order': order,
+            'order_items': order_items,
+            'payments': payments,
+            'status_history': status_history,
+            'next_statuses': next_statuses,
+        })
+
+
+class StaffOrderTransitionView(StaffRequiredMixin, View):
+    def post(self, request, pk):
+        order = get_object_or_404(Order, pk=pk)
+        target_status = request.POST.get('target_status', '').strip().upper()
+        notes = request.POST.get('notes', '').strip()
+        courier_name = request.POST.get('courier_name', '').strip()
+        tracking_number = request.POST.get('tracking_number', '').strip()
+
+        try:
+            transition_order_status(
+                order=order,
+                target_status=target_status,
+                user=request.user,
+                notes=notes,
+                courier_name=courier_name,
+                tracking_number=tracking_number
+            )
+            messages.success(
+                request,
+                f"Order #{order.order_number} successfully updated to '{order.get_status_display()}'."
+            )
+        except FulfillmentTransitionError as e:
+            messages.error(request, str(e))
+        except Exception as e:
+            logger.exception(f"Unexpected error transitioning order #{order.order_number}")
+            messages.error(request, f"Error updating order: {str(e)}")
+
+        redirect_to = request.POST.get('next') or reverse('staff-order-detail', kwargs={'pk': order.pk})
+        return redirect(redirect_to)
+
+    def get(self, request, pk):
+        return HttpResponseNotAllowed(['POST'])
 
 
 class SSLCommerzInitiateView(LoginRequiredMixin, View):
@@ -490,6 +720,54 @@ class SSLCommerzIPNView(View):
             return HttpResponse("IPN Processed Successfully", status=200)
         else:
             return HttpResponse(f"Validation failed: {result}", status=400)
+
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class NotificationListView(LoginRequiredMixin, View):
+    def get(self, request):
+        filter_type = request.GET.get('filter', 'all')
+        notifications = Notification.objects.filter(recipient=request.user).select_related('order')
+
+        if filter_type == 'unread':
+            notifications = notifications.filter(is_read=False)
+
+        unread_count = Notification.objects.filter(recipient=request.user, is_read=False).count()
+
+        return render(request, 'app/notifications.html', {
+            'notifications': notifications,
+            'unread_count': unread_count,
+            'filter_type': filter_type,
+        })
+
+
+class NotificationMarkReadView(LoginRequiredMixin, View):
+    def post(self, request, pk):
+        success = mark_notification_as_read(pk, request.user)
+        unread_count = get_unread_notifications_count(request.user)
+
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'success': success, 'unread_count': unread_count})
+
+        if success:
+            messages.success(request, "Notification marked as read.")
+        return redirect('notifications')
+
+    def get(self, request, pk):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class NotificationMarkAllReadView(LoginRequiredMixin, View):
+    def post(self, request):
+        count = mark_all_notifications_as_read(request.user)
+        unread_count = get_unread_notifications_count(request.user)
+
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'success': True, 'count': count, 'unread_count': unread_count})
+
+        messages.success(request, f"{count} notifications marked as read." if count else "No unread notifications.")
+        return redirect('notifications')
 
     def get(self, request):
         return HttpResponseNotAllowed(['POST'])

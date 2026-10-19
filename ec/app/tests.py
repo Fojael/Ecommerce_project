@@ -4,7 +4,19 @@ from django.contrib.auth.models import User
 from decimal import Decimal
 from unittest.mock import patch
 from django.db.models import ProtectedError
-from app.models import Customer, Product, Cart, CartItem, Order, OrderItem, Payment
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
+from django.core import mail
+from app.models import (
+    Customer, Product, Cart, CartItem, Order, OrderItem, Payment, StockAdjustment,
+    OrderStatusHistory, Notification
+)
+from app.services.inventory import (
+    adjust_stock,
+    deduct_order_stock,
+    restore_order_stock,
+    InsufficientStockError,
+)
 
 
 
@@ -2040,5 +2052,1162 @@ class PaymentSecurityReviewTests(TestCase):
         self.assertEqual(self.payment.status, 'PAID')
         self.assertEqual(self.payment.risk_level, '1')
         self.assertEqual(self.payment.risk_title, 'Suspicious Activity')
+
+
+class InventoryAndStockManagementTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username='inv_user', password='Password123!')
+        self.staff_user = User.objects.create_user(username='staff_inv', password='Password123!', is_staff=True)
+        self.other_user = User.objects.create_user(username='other_inv', password='Password123!')
+        self.customer = Customer.objects.create(
+            user=self.user,
+            name="Inventory Customer",
+            locality="Banani Road 11",
+            city="Dhaka",
+            mobile="01711223344",
+            zipcode=1213,
+            state="Dhaka"
+        )
+        self.product = Product.objects.create(
+            title="Organic Milk",
+            selling_price=120.0,
+            discounted_price=100.0,
+            description="Fresh organic milk",
+            category="ML",
+            stock=10,
+            low_stock_threshold=3
+        )
+        self.client.login(username='inv_user', password='Password123!')
+
+    def test_initial_stock_and_valid_inventory_adjustments(self):
+        """1. Verify initial stock and valid staff adjustments with audit logs."""
+        self.assertEqual(self.product.stock, 10)
+        self.assertTrue(self.product.is_in_stock)
+        self.assertFalse(self.product.is_low_stock)
+        self.assertFalse(self.product.is_out_of_stock)
+
+        # Restock +5 items
+        adjust_stock(
+            product=self.product,
+            quantity_change=5,
+            reason='RESTOCK',
+            user=self.staff_user,
+            notes='Shipment received'
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 15)
+
+        # Verify audit log entry
+        adjustment = StockAdjustment.objects.filter(product=self.product).latest('timestamp')
+        self.assertEqual(adjustment.quantity_change, 5)
+        self.assertEqual(adjustment.resulting_stock, 15)
+        self.assertEqual(adjustment.reason, 'RESTOCK')
+        self.assertEqual(adjustment.user, self.staff_user)
+        self.assertEqual(adjustment.notes, 'Shipment received')
+
+    def test_negative_stock_rejection_python_validation(self):
+        """2a. adjust_stock rejects quantity change driving stock negative."""
+        with self.assertRaises(ValidationError):
+            adjust_stock(self.product, -15, reason='DAMAGED')
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+
+    def test_negative_stock_rejection_db_constraint(self):
+        """2b. Database CheckConstraint rejects negative stock at DB level."""
+        self.product.stock = -1
+        with self.assertRaises(IntegrityError):
+            self.product.save()
+
+    def test_adding_in_stock_product_to_cart_does_not_deduct_inventory(self):
+        """3. Adding in-stock product to cart succeeds without deducting inventory."""
+        response = self.client.post(reverse('add-to-cart'), {'prod_id': self.product.id, 'quantity': 2})
+        self.assertRedirects(response, reverse('show-cart'))
+
+        cart = Cart.objects.get(user=self.user)
+        self.assertEqual(cart.items.count(), 1)
+        self.assertEqual(cart.items.first().quantity, 2)
+
+        # Stock must remain unchanged
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+
+    def test_reject_out_of_stock_product_addition_to_cart(self):
+        """4. Reject adding an out-of-stock product (stock=0) to cart."""
+        self.product.stock = 0
+        self.product.save()
+
+        response = self.client.post(reverse('add-to-cart'), {'prod_id': self.product.id, 'quantity': 1})
+        self.assertRedirects(response, reverse('product-detail', kwargs={'pk': self.product.id}))
+
+        cart = Cart.objects.filter(user=self.user).first()
+        if cart:
+            self.assertEqual(cart.items.count(), 0)
+
+    def test_reject_cart_quantity_greater_than_available_stock(self):
+        """5. Reject requested quantity greater than available stock on add and plus-cart."""
+        self.product.stock = 3
+        self.product.save()
+
+        # Add 5 items when only 3 in stock
+        response = self.client.post(reverse('add-to-cart'), {'prod_id': self.product.id, 'quantity': 5})
+        self.assertRedirects(response, reverse('product-detail', kwargs={'pk': self.product.id}))
+
+        cart = Cart.objects.filter(user=self.user).first()
+        self.assertTrue(cart is None or cart.items.count() == 0)
+
+        # Add 2 items (valid)
+        self.client.post(reverse('add-to-cart'), {'prod_id': self.product.id, 'quantity': 2})
+        cart = Cart.objects.get(user=self.user)
+        item = cart.items.first()
+        self.assertEqual(item.quantity, 2)
+
+        # Plus cart to 3 (valid, equals stock)
+        self.client.post(reverse('plus-cart'), {'item_id': item.id})
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 3)
+
+        # Plus cart to 4 (exceeds stock of 3) -> rejected
+        self.client.post(reverse('plus-cart'), {'item_id': item.id})
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 3)
+
+    def test_reject_checkout_when_cart_item_stock_becomes_insufficient(self):
+        """6. Reject checkout when stock becomes insufficient after item was added to cart."""
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=5)
+
+        # Stock is reduced by another order / admin to 3
+        self.product.stock = 3
+        self.product.save()
+
+        response = self.client.get(reverse('checkout'))
+        self.assertRedirects(response, reverse('show-cart'))
+
+    def test_successful_order_creation_deducts_stock_and_records_audit(self):
+        """7. Successful order placement deducts stock and logs audit trail."""
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=4)
+
+        response = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+        self.assertRedirects(response, reverse('order-confirmation', kwargs={'pk': order.pk}))
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 6)
+        self.assertTrue(order.stock_deducted)
+        self.assertFalse(order.stock_restored)
+
+        # Verify StockAdjustment
+        adjustment = StockAdjustment.objects.filter(order=order, product=self.product).first()
+        self.assertIsNotNone(adjustment)
+        self.assertEqual(adjustment.quantity_change, -4)
+        self.assertEqual(adjustment.resulting_stock, 6)
+        self.assertEqual(adjustment.reason, 'ORDER_PLACED')
+
+    @patch('app.views.OrderItem.objects.create')
+    def test_order_creation_rollback_on_failure_preserves_stock(self, mock_create):
+        """8. If order placement encounters an exception, stock changes roll back completely."""
+        mock_create.side_effect = RuntimeError("Database crash during order items save")
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=3)
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # Stock untouched
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(StockAdjustment.objects.count(), 0)
+
+    def test_multiple_cart_items_with_one_insufficient_stock_rolls_back_all(self):
+        """9. Multiple items where one is out of stock aborts entire checkout without stock changes."""
+        p2 = Product.objects.create(
+            title="Cheese",
+            selling_price=200.0,
+            discounted_price=180.0,
+            category="CZ",
+            stock=1
+        )
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=2)
+        CartItem.objects.create(cart=cart, product=p2, quantity=3)  # Exceeds p2 stock of 1
+
+        response = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        self.assertRedirects(response, reverse('show-cart'))
+
+        # No order created, neither product's stock modified
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 0)
+        self.product.refresh_from_db()
+        p2.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertEqual(p2.stock, 1)
+
+    def test_stock_restoration_after_order_cancellation(self):
+        """10. Eligible order cancellation restores stock and logs audit record."""
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=3)
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)
+
+        # Cancel the order
+        response = self.client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.assertRedirects(response, reverse('order-detail', kwargs={'pk': order.pk}))
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'CANCELLED')
+        self.assertTrue(order.stock_restored)
+
+        # Stock restored
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+
+        # Adjustment record
+        adjustment = StockAdjustment.objects.filter(order=order, product=self.product, reason='ORDER_CANCELLED').first()
+        self.assertIsNotNone(adjustment)
+        self.assertEqual(adjustment.quantity_change, 3)
+        self.assertEqual(adjustment.resulting_stock, 10)
+
+    def test_duplicate_order_cancellation_does_not_restore_stock_twice(self):
+        """11. Duplicate cancellation is idempotent and does not restore stock twice."""
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=4)
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        # First cancellation
+        self.client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+
+        # Second cancellation attempt
+        self.client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # Still 10, not 14
+
+    @patch('app.services.sslcommerz.requests.post')
+    def test_payment_cancellation_does_not_restore_stock_while_order_active(self, mock_post):
+        """12. Payment cancellation on gateway leaves order active/pending and does NOT restore stock."""
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {
+            'status': 'SUCCESS',
+            'GatewayPageURL': 'https://sandbox.sslcommerz.com/gw',
+            'sessionkey': 'SES_INV_1'
+        }
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=3)
+
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+        payment = order.payments.first()
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)
+
+        # Gateway cancellation callback
+        self.client.post(reverse('sslcommerz-cancel'), {'tran_id': payment.transaction_id})
+        payment.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(payment.status, 'CANCELLED')
+        self.assertEqual(order.payment_status, 'PENDING')
+        self.assertEqual(order.status, 'PENDING')
+
+        # Stock must remain deducted (not restored) because order is still active
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)
+
+    @patch('app.services.sslcommerz.requests.post')
+    def test_sslcommerz_payment_retry_does_not_deduct_stock_again(self, mock_post):
+        """13. Retrying payment on an active order creates a new payment attempt without deducting stock again."""
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {
+            'status': 'SUCCESS',
+            'GatewayPageURL': 'https://sandbox.sslcommerz.com/gw_retry',
+            'sessionkey': 'SES_INV_RETRY'
+        }
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=2)
+
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+
+        # Retry payment
+        self.client.post(reverse('sslcommerz-initiate', kwargs={'order_id': order.pk}))
+        self.assertEqual(order.payments.count(), 2)
+
+        # Stock must remain 8 (NOT deducted again to 6)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+
+    def test_unauthenticated_and_unauthorized_cancellation_prevented(self):
+        """14. Unauthenticated or non-owner users cannot cancel an order."""
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=1)
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        # Anonymous request -> 302 to login
+        anon_client = Client()
+        anon_resp = anon_client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.assertEqual(anon_resp.status_code, 302)
+        self.assertIn(reverse('login'), anon_resp.url)
+
+        # Other authenticated user -> 404
+        other_client = Client()
+        other_client.login(username='other_inv', password='Password123!')
+        other_resp = other_client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.assertEqual(other_resp.status_code, 404)
+
+        # Paid order cannot be cancelled by customer
+        order.payment_status = 'PAID'
+        order.save()
+        resp = self.client.post(reverse('order-cancel', kwargs={'pk': order.pk}))
+        self.assertRedirects(resp, reverse('order-detail', kwargs={'pk': order.pk}))
+        order.refresh_from_db()
+        self.assertNotEqual(order.status, 'CANCELLED')
+
+    def test_stock_adjustment_admin_immutability(self):
+        """15. StockAdjustmentAdmin disallows delete and change operations in admin."""
+        from django.contrib.admin.sites import site
+        from app.admin import StockAdjustmentAdmin
+        adjustment_admin = StockAdjustmentAdmin(StockAdjustment, site)
+
+        request = type('Request', (), {'user': self.staff_user})()
+        self.assertFalse(adjustment_admin.has_delete_permission(request))
+        self.assertFalse(adjustment_admin.has_change_permission(request))
+
+    def test_admin_staff_cancellation_guards_fulfilled_and_paid_orders(self):
+        """16. Staff cancellation action in admin skips fulfilled (SHIPPED, DELIVERED) and paid orders."""
+        from django.contrib.admin.sites import site
+        from app.admin import OrderAdmin
+        order_admin = OrderAdmin(Order, site)
+
+        # Create 3 orders: 1 pending unpaid, 1 paid, 1 shipped
+        cart = Cart.objects.create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=1)
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        pending_order = Order.objects.get(user=self.user)
+
+        paid_order = Order.objects.create(
+            user=self.user,
+            shipping_name="Cust",
+            shipping_mobile="01711223344",
+            shipping_locality="Loc",
+            shipping_city="City",
+            shipping_zipcode="1200",
+            shipping_state="Dhaka",
+            subtotal=Decimal('100.00'),
+            grand_total=Decimal('170.00'),
+            status='PENDING',
+            payment_status='PAID',
+            stock_deducted=True
+        )
+
+        shipped_order = Order.objects.create(
+            user=self.user,
+            shipping_name="Cust",
+            shipping_mobile="01711223344",
+            shipping_locality="Loc",
+            shipping_city="City",
+            shipping_zipcode="1200",
+            shipping_state="Dhaka",
+            subtotal=Decimal('100.00'),
+            grand_total=Decimal('170.00'),
+            status='SHIPPED',
+            payment_status='PENDING',
+            stock_deducted=True
+        )
+
+        # Run admin action
+        request = type('Request', (), {'user': self.staff_user, '_messages': []})()
+        messages_sent = []
+        order_admin.message_user = lambda req, msg: messages_sent.append(msg)
+
+        qs = Order.objects.filter(pk__in=[pending_order.pk, paid_order.pk, shipped_order.pk])
+        order_admin.cancel_selected_orders(request, qs)
+
+        pending_order.refresh_from_db()
+        paid_order.refresh_from_db()
+        shipped_order.refresh_from_db()
+
+        self.assertEqual(pending_order.status, 'CANCELLED')
+        self.assertTrue(pending_order.stock_restored)
+
+        # Paid and shipped orders were NOT cancelled
+        self.assertEqual(paid_order.status, 'PENDING')
+        self.assertFalse(paid_order.stock_restored)
+
+        self.assertEqual(shipped_order.status, 'SHIPPED')
+        self.assertFalse(shipped_order.stock_restored)
+        self.assertTrue(any('skipped' in m for m in messages_sent))
+
+
+class OrderFulfillmentAndDeliveryTests(TestCase):
+    def setUp(self):
+        self.customer_user = User.objects.create_user(username='ful_cust', password='Password123!')
+        self.staff_user = User.objects.create_user(username='ful_staff', password='Password123!', is_staff=True)
+        self.other_user = User.objects.create_user(username='ful_other', password='Password123!')
+
+        self.customer = Customer.objects.create(
+            user=self.customer_user,
+            name="Fulfillment Customer",
+            locality="Dhanmondi 32",
+            city="Dhaka",
+            mobile="01799887766",
+            zipcode=1209,
+            state="Dhaka"
+        )
+        self.product = Product.objects.create(
+            title="Full Cream Milk",
+            selling_price=100.0,
+            discounted_price=90.0,
+            category="ML",
+            stock=10
+        )
+        self.order = Order.objects.create(
+            user=self.customer_user,
+            shipping_name="Fulfillment Customer",
+            shipping_mobile="01799887766",
+            shipping_locality="Dhanmondi 32",
+            shipping_city="Dhaka",
+            shipping_zipcode="1209",
+            shipping_state="Dhaka",
+            subtotal=Decimal('90.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('160.00'),
+            status='PENDING',
+            payment_status='PENDING',
+            stock_deducted=True,
+            stock_restored=False
+        )
+        OrderItem.objects.create(
+            order=self.order,
+            product=self.product,
+            product_name=self.product.title,
+            unit_price=Decimal('90.00'),
+            quantity=2,
+            subtotal=Decimal('180.00')
+        )
+        self.product.stock = 8
+        self.product.save()
+
+    def test_full_lifecycle_progression(self):
+        """1. Order progresses through full valid lifecycle: PENDING -> ACCEPTED -> PROCESSING -> READY -> SHIPPED -> DELIVERED."""
+        from app.services.fulfillment import transition_order_status
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user, notes='Order accepted')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'ACCEPTED')
+
+        transition_order_status(self.order, 'PROCESSING', user=self.staff_user, notes='Packing started')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'PROCESSING')
+
+        transition_order_status(self.order, 'READY', user=self.staff_user, notes='Ready for courier')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'READY')
+
+        transition_order_status(
+            self.order,
+            'SHIPPED',
+            user=self.staff_user,
+            notes='Dispatched via Pathao',
+            courier_name='Pathao Express',
+            tracking_number='PTH-12345'
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'SHIPPED')
+        self.assertEqual(self.order.courier_name, 'Pathao Express')
+        self.assertEqual(self.order.tracking_number, 'PTH-12345')
+        self.assertIsNotNone(self.order.shipped_at)
+
+        transition_order_status(self.order, 'DELIVERED', user=self.staff_user, notes='Delivered safely')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'DELIVERED')
+        self.assertIsNotNone(self.order.delivered_at)
+
+        # Stock must remain unchanged (8) throughout the progression
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(self.order.status_history.count(), 5)
+
+    def test_invalid_transitions_rejected(self):
+        """2. Skipping intermediate states or backwards transitions are rejected."""
+        from app.services.fulfillment import transition_order_status, FulfillmentTransitionError
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'DELIVERED', user=self.staff_user)
+
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'PENDING', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'READY', user=self.staff_user)
+
+    def test_terminal_states_immutable(self):
+        """3. Terminal states DELIVERED and CANCELLED cannot transition to any other status."""
+        from app.services.fulfillment import transition_order_status, FulfillmentTransitionError
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+        transition_order_status(self.order, 'PROCESSING', user=self.staff_user)
+        transition_order_status(self.order, 'READY', user=self.staff_user)
+        transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+        transition_order_status(self.order, 'DELIVERED', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'CANCELLED', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+
+        cancelled_order = Order.objects.create(
+            user=self.customer_user,
+            shipping_name="Cust",
+            shipping_mobile="01799887766",
+            shipping_locality="Loc",
+            shipping_city="City",
+            shipping_zipcode="1209",
+            shipping_state="Dhaka",
+            subtotal=Decimal('50.00'),
+            grand_total=Decimal('120.00'),
+            status='PENDING'
+        )
+        transition_order_status(cancelled_order, 'CANCELLED', user=self.staff_user)
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(cancelled_order, 'ACCEPTED', user=self.staff_user)
+
+    def test_paid_orders_cannot_be_cancelled_without_refund(self):
+        """4. Paid orders cannot be cancelled through regular fulfillment transition."""
+        from app.services.fulfillment import transition_order_status, FulfillmentTransitionError
+        self.order.payment_status = 'PAID'
+        self.order.save()
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'CANCELLED', user=self.staff_user)
+        self.order.refresh_from_db()
+        self.assertNotEqual(self.order.status, 'CANCELLED')
+
+    def test_shipped_order_cannot_be_cancelled(self):
+        """5. In-transit/shipped orders cannot be cancelled."""
+        from app.services.fulfillment import transition_order_status, FulfillmentTransitionError
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+        transition_order_status(self.order, 'PROCESSING', user=self.staff_user)
+        transition_order_status(self.order, 'READY', user=self.staff_user)
+        transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+
+        with self.assertRaises(FulfillmentTransitionError):
+            transition_order_status(self.order, 'CANCELLED', user=self.staff_user)
+
+    def test_customer_cannot_cancel_processing_or_later_order(self):
+        """6. Customer attempting to POST cancel an order that has moved beyond PENDING is rejected."""
+        from app.services.fulfillment import transition_order_status
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+
+        client = Client()
+        client.login(username='ful_cust', password='Password123!')
+        response = client.post(reverse('order-cancel', kwargs={'pk': self.order.pk}))
+        self.assertRedirects(response, reverse('order-detail', kwargs={'pk': self.order.pk}))
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'ACCEPTED')
+
+    def test_regular_customer_cannot_access_staff_queue_or_transition(self):
+        """7. Regular customers are forbidden from accessing staff queue or making transitions."""
+        client = Client()
+        client.login(username='ful_cust', password='Password123!')
+
+        queue_resp = client.get(reverse('staff-orders'))
+        self.assertRedirects(queue_resp, reverse('orders'))
+
+        trans_resp = client.post(
+            reverse('staff-order-transition', kwargs={'pk': self.order.pk}),
+            {'target_status': 'ACCEPTED'}
+        )
+        self.assertRedirects(trans_resp, reverse('orders'))
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'PENDING')
+
+    def test_anonymous_user_cannot_access_staff_portal(self):
+        """8. Anonymous requests to staff portal redirect to login."""
+        anon_client = Client()
+        resp = anon_client.get(reverse('staff-orders'))
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse('login'), resp.url)
+
+    def test_staff_order_queue_and_transition_view(self):
+        """9. Staff user can view order queue and transition orders via POST."""
+        client = Client()
+        client.login(username='ful_staff', password='Password123!')
+
+        response = client.get(reverse('staff-orders'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.order.order_number)
+
+        post_resp = client.post(
+            reverse('staff-order-transition', kwargs={'pk': self.order.pk}),
+            {'target_status': 'ACCEPTED', 'notes': 'Accepted by staff'}
+        )
+        self.assertRedirects(post_resp, reverse('staff-order-detail', kwargs={'pk': self.order.pk}))
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'ACCEPTED')
+
+    def test_payment_status_and_fulfillment_status_separation(self):
+        """10. Advancing fulfillment status leaves payment_status completely independent."""
+        from app.services.fulfillment import transition_order_status
+        self.assertEqual(self.order.payment_status, 'PENDING')
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+        transition_order_status(self.order, 'PROCESSING', user=self.staff_user)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, 'PENDING')
+
+        self.order.payment_status = 'PAID'
+        self.order.save()
+        transition_order_status(self.order, 'READY', user=self.staff_user)
+        transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+        transition_order_status(self.order, 'DELIVERED', user=self.staff_user)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, 'PAID')
+        self.assertEqual(self.order.status, 'DELIVERED')
+
+    def test_cancellation_restores_inventory_and_logs_audit(self):
+        """11. Cancelling an eligible order restores stock and records audit history."""
+        from app.services.fulfillment import transition_order_status
+        self.product.refresh_from_db()
+        initial_stock = self.product.stock
+
+        transition_order_status(self.order, 'CANCELLED', user=self.staff_user, notes='Out of stock')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'CANCELLED')
+        self.assertTrue(self.order.stock_restored)
+        self.assertIsNotNone(self.order.cancelled_at)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, initial_stock + 2)
+
+        history = self.order.status_history.filter(to_status='CANCELLED').first()
+        self.assertIsNotNone(history)
+        self.assertEqual(history.notes, 'Out of stock')
+
+    def test_admin_actions_transition_eligible_orders(self):
+        """12. Admin actions advance eligible orders and skip invalid ones."""
+        from django.contrib.admin.sites import site
+        from app.admin import OrderAdmin
+        admin_obj = OrderAdmin(Order, site)
+
+        request = type('Request', (), {'user': self.staff_user, '_messages': []})()
+        messages_sent = []
+        admin_obj.message_user = lambda req, msg: messages_sent.append(msg)
+
+        qs = Order.objects.filter(pk=self.order.pk)
+        admin_obj.accept_selected_orders(request, qs)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'ACCEPTED')
+
+        admin_obj.process_selected_orders(request, qs)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'PROCESSING')
+
+        admin_obj.deliver_selected_orders(request, qs)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'PROCESSING')  # Skipped!
+
+    @patch('app.services.fulfillment.OrderStatusHistory.objects.create')
+    def test_cancellation_atomic_rollback_on_simulated_failure(self, mock_history):
+        """13. Simulated failure during cancellation rolls back status, stock restoration, and audit records."""
+        from app.services.fulfillment import transition_order_status
+        mock_history.side_effect = RuntimeError("Simulated database failure during audit trail creation")
+
+        with self.assertRaises(RuntimeError):
+            transition_order_status(self.order, 'CANCELLED', user=self.staff_user)
+
+        # Entire transaction must have rolled back
+        self.order.refresh_from_db()
+        self.product.refresh_from_db()
+
+        self.assertEqual(self.order.status, 'PENDING')
+        self.assertFalse(self.order.stock_restored)
+        self.assertIsNone(self.order.cancelled_at)
+        self.assertEqual(self.product.stock, 8)  # Stock untouched
+        self.assertEqual(StockAdjustment.objects.filter(order=self.order, reason='ORDER_CANCELLED').count(), 0)
+        self.assertEqual(self.order.status_history.count(), 0)
+
+    def test_legacy_order_without_history_renders_cleanly(self):
+        """14. Legacy orders without OrderStatusHistory render cleanly across customer and staff views."""
+        legacy_order = Order.objects.create(
+            user=self.customer_user,
+            shipping_name="Legacy Cust",
+            shipping_mobile="01799887766",
+            shipping_locality="Loc",
+            shipping_city="City",
+            shipping_zipcode="1209",
+            shipping_state="Dhaka",
+            subtotal=Decimal('50.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('120.00'),
+            status='PENDING'
+        )
+        self.assertEqual(legacy_order.status_history.count(), 0)
+
+        # Customer view
+        client = Client()
+        client.login(username='ful_cust', password='Password123!')
+        resp = client.get(reverse('order-detail', kwargs={'pk': legacy_order.pk}))
+        self.assertEqual(resp.status_code, 200)
+
+        # Staff detail view
+        staff_client = Client()
+        staff_client.login(username='ful_staff', password='Password123!')
+        staff_resp = staff_client.get(reverse('staff-order-detail', kwargs={'pk': legacy_order.pk}))
+        self.assertEqual(staff_resp.status_code, 200)
+        self.assertContains(staff_resp, "No historical transition records found.")
+
+        # Staff queue
+        queue_resp = staff_client.get(reverse('staff-orders'))
+        self.assertEqual(queue_resp.status_code, 200)
+
+    def test_terminal_state_cannot_be_reopened_via_crafted_post(self):
+        """15. Crafted POST to staff transition endpoint cannot reopen DELIVERED or CANCELLED order."""
+        from app.services.fulfillment import transition_order_status
+        transition_order_status(self.order, 'ACCEPTED', user=self.staff_user)
+        transition_order_status(self.order, 'PROCESSING', user=self.staff_user)
+        transition_order_status(self.order, 'READY', user=self.staff_user)
+        transition_order_status(self.order, 'SHIPPED', user=self.staff_user)
+        transition_order_status(self.order, 'DELIVERED', user=self.staff_user)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'DELIVERED')
+
+        staff_client = Client()
+        staff_client.login(username='ful_staff', password='Password123!')
+
+        # Attempt to reopen to PENDING
+        post_resp = staff_client.post(
+            reverse('staff-order-transition', kwargs={'pk': self.order.pk}),
+            {'target_status': 'PENDING'}
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'DELIVERED')
+
+        # Attempt to reopen to PROCESSING
+        post_resp = staff_client.post(
+            reverse('staff-order-transition', kwargs={'pk': self.order.pk}),
+            {'target_status': 'PROCESSING'}
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'DELIVERED')
+
+
+class NotificationAndEmailTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.password = 'TestPass123!@#'
+        self.user = User.objects.create_user(
+            username='notif_customer',
+            email='customer@example.com',
+            password=self.password
+        )
+        self.other_user = User.objects.create_user(
+            username='other_customer',
+            email='other@example.com',
+            password=self.password
+        )
+        self.staff_user = User.objects.create_user(
+            username='staff_user',
+            email='staff@example.com',
+            password=self.password,
+            is_staff=True,
+            is_superuser=True
+        )
+
+        self.customer_profile = Customer.objects.create(
+            user=self.user,
+            name='Test Customer',
+            locality='Dhanmondi 27',
+            city='Dhaka',
+            mobile='01711000000',
+            zipcode=1209,
+            state='Dhaka'
+        )
+
+        self.product = Product.objects.create(
+            title='Pasteurized Cow Milk',
+            selling_price=100.00,
+            discounted_price=85.00,
+            description='Fresh and chilled milk',
+            composition='100% pure cow milk',
+            prodapp='Dairy',
+            category='ML',
+            stock=50,
+            low_stock_threshold=5,
+        )
+
+        self.order = Order.objects.create(
+            user=self.user,
+            shipping_name=self.customer_profile.name,
+            shipping_mobile=self.customer_profile.mobile,
+            shipping_locality=self.customer_profile.locality,
+            shipping_city=self.customer_profile.city,
+            shipping_zipcode=str(self.customer_profile.zipcode),
+            shipping_state=self.customer_profile.state,
+            subtotal=Decimal('170.00'),
+            total_discount=Decimal('30.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('240.00'),
+            status='PENDING',
+            payment_status='PENDING',
+            stock_deducted=True,
+            stock_restored=False,
+        )
+
+        self.order_item = OrderItem.objects.create(
+            order=self.order,
+            product=self.product,
+            product_name=self.product.title,
+            unit_price=Decimal('85.00'),
+            quantity=2,
+            subtotal=Decimal('170.00')
+        )
+
+        # Clear mailbox before each test
+        mail.outbox = []
+
+    def test_notification_creation_and_attributes(self):
+        """1. In-app notification creation with proper fields and default states."""
+        notif = Notification.objects.create(
+            recipient=self.user,
+            title='Order Received',
+            message='Your order has been received.',
+            notification_type='ORDER_PLACED',
+            order=self.order,
+            event_key=f'test_event_{self.order.id}'
+        )
+        self.assertEqual(notif.recipient, self.user)
+        self.assertEqual(notif.title, 'Order Received')
+        self.assertEqual(notif.notification_type, 'ORDER_PLACED')
+        self.assertEqual(notif.order, self.order)
+        self.assertFalse(notif.is_read)
+        self.assertIsNone(notif.read_at)
+        self.assertIsNotNone(notif.created_at)
+        self.assertIn('Unread', str(notif))
+
+    def test_mark_as_read_method_and_service(self):
+        """2. Marking notification as read updates is_read and read_at timestamp."""
+        from app.services.notification import mark_notification_as_read
+        notif = Notification.objects.create(
+            recipient=self.user,
+            title='Test Alert',
+            message='Sample message',
+            notification_type='SYSTEM'
+        )
+        self.assertFalse(notif.is_read)
+        self.assertIsNone(notif.read_at)
+
+        # Other user cannot mark it as read
+        success_other = mark_notification_as_read(notif.pk, self.other_user)
+        self.assertFalse(success_other)
+        notif.refresh_from_db()
+        self.assertFalse(notif.is_read)
+
+        # Recipient marks it as read
+        success = mark_notification_as_read(notif.pk, self.user)
+        self.assertTrue(success)
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_read)
+        self.assertIsNotNone(notif.read_at)
+        self.assertIn('Read', str(notif))
+
+    def test_mark_all_notifications_as_read(self):
+        """3. mark_all_notifications_as_read updates only the recipient's unread records."""
+        from app.services.notification import mark_all_notifications_as_read
+        for i in range(3):
+            Notification.objects.create(
+                recipient=self.user,
+                title=f'Customer Note {i}',
+                message='Message',
+                is_read=False
+            )
+        for i in range(2):
+            Notification.objects.create(
+                recipient=self.other_user,
+                title=f'Other Note {i}',
+                message='Message',
+                is_read=False
+            )
+
+        updated_count = mark_all_notifications_as_read(self.user)
+        self.assertEqual(updated_count, 3)
+        self.assertEqual(Notification.objects.filter(recipient=self.user, is_read=False).count(), 0)
+        self.assertEqual(Notification.objects.filter(recipient=self.other_user, is_read=False).count(), 2)
+
+    def test_get_unread_notifications_count(self):
+        """4. get_unread_notifications_count returns accurate counts."""
+        from app.services.notification import get_unread_notifications_count
+        self.assertEqual(get_unread_notifications_count(self.user), 0)
+
+        n1 = Notification.objects.create(recipient=self.user, title='N1', message='M1')
+        n2 = Notification.objects.create(recipient=self.user, title='N2', message='M2')
+        self.assertEqual(get_unread_notifications_count(self.user), 2)
+
+        n1.mark_as_read()
+        self.assertEqual(get_unread_notifications_count(self.user), 1)
+
+    def test_context_processor_unread_count(self):
+        """5. unread_notifications_count context processor provides accurate context."""
+        from app.context_processors import unread_notifications_count
+        from django.test.client import RequestFactory
+        factory = RequestFactory()
+
+        request = factory.get('/')
+        request.user = self.user
+        self.assertEqual(unread_notifications_count(request)['unread_notifications_count'], 0)
+
+        Notification.objects.create(recipient=self.user, title='N1', message='M1')
+        self.assertEqual(unread_notifications_count(request)['unread_notifications_count'], 1)
+
+        # Anonymous user
+        from django.contrib.auth.models import AnonymousUser
+        request.user = AnonymousUser()
+        self.assertEqual(unread_notifications_count(request)['unread_notifications_count'], 0)
+
+    def test_notification_list_view_authenticated(self):
+        """6. Customer accesses /notifications/, sees own notifications with filters."""
+        Notification.objects.create(recipient=self.user, title='My Unread Note', message='Unread', is_read=False)
+        Notification.objects.create(recipient=self.user, title='My Read Note', message='Read', is_read=True)
+        Notification.objects.create(recipient=self.other_user, title='Secret Other Note', message='Other', is_read=False)
+
+        self.client.login(username=self.user.username, password=self.password)
+
+        # All filter
+        response = self.client.get(reverse('notifications'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'My Unread Note')
+        self.assertContains(response, 'My Read Note')
+        self.assertNotContains(response, 'Secret Other Note')
+
+        # Unread filter
+        response_unread = self.client.get(reverse('notifications') + '?filter=unread')
+        self.assertEqual(response_unread.status_code, 200)
+        self.assertContains(response_unread, 'My Unread Note')
+        self.assertNotContains(response_unread, 'My Read Note')
+
+    def test_notification_list_view_unauthenticated_redirects(self):
+        """7. Anonymous user cannot access /notifications/ and is redirected to login."""
+        response = self.client.get(reverse('notifications'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse('login'), response.url)
+
+    def test_mark_read_view_post_and_get(self):
+        """8. NotificationMarkReadView accepts POST, rejects GET, rejects unauthorized user."""
+        notif = Notification.objects.create(recipient=self.user, title='Sample', message='Sample')
+
+        # Anonymous cannot mark read
+        post_anon = self.client.post(reverse('notification-mark-read', kwargs={'pk': notif.pk}))
+        self.assertEqual(post_anon.status_code, 302)
+
+        # Other user cannot mark read
+        self.client.login(username=self.other_user.username, password=self.password)
+        post_other = self.client.post(reverse('notification-mark-read', kwargs={'pk': notif.pk}))
+        self.assertEqual(post_other.status_code, 302)
+        notif.refresh_from_db()
+        self.assertFalse(notif.is_read)
+
+        # Owner marks read
+        self.client.login(username=self.user.username, password=self.password)
+        post_owner = self.client.post(reverse('notification-mark-read', kwargs={'pk': notif.pk}))
+        self.assertRedirects(post_owner, reverse('notifications'))
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_read)
+
+        # GET request returns 405 Method Not Allowed
+        get_owner = self.client.get(reverse('notification-mark-read', kwargs={'pk': notif.pk}))
+        self.assertEqual(get_owner.status_code, 405)
+
+    def test_mark_all_read_view_post_and_get(self):
+        """9. NotificationMarkAllReadView marks all user notifications as read via POST."""
+        for i in range(2):
+            Notification.objects.create(recipient=self.user, title=f'Note {i}', message='M')
+
+        self.client.login(username=self.user.username, password=self.password)
+
+        get_resp = self.client.get(reverse('notification-mark-all-read'))
+        self.assertEqual(get_resp.status_code, 405)
+
+        post_resp = self.client.post(reverse('notification-mark-all-read'))
+        self.assertRedirects(post_resp, reverse('notifications'))
+        self.assertEqual(Notification.objects.filter(recipient=self.user, is_read=False).count(), 0)
+
+    def test_order_placed_notification_and_email(self):
+        """10. Placing an order dispatches in-app notification and confirmation email."""
+        from app.services.notification import notify_order_placed
+        notif = notify_order_placed(self.order)
+
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.recipient, self.user)
+        self.assertEqual(notif.notification_type, 'ORDER_PLACED')
+        self.assertIn(self.order.order_number, notif.title)
+
+        # Verify email in outbox
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertIn(self.order.order_number, sent_email.subject)
+        self.assertEqual(sent_email.to, [self.user.email])
+        self.assertIn('Order Confirmation', sent_email.subject)
+        self.assertIn(self.order.shipping_name, sent_email.body)
+
+    def test_order_fulfillment_transition_notifications_and_emails(self):
+        """11. Advancing fulfillment status generates notifications and status emails."""
+        from app.services.fulfillment import transition_order_status
+        with self.captureOnCommitCallbacks(execute=True):
+            transition_order_status(self.order, 'ACCEPTED', user=self.staff_user, notes='Order confirmed by kitchen')
+
+        notif = Notification.objects.filter(order=self.order, notification_type='ORDER_ACCEPTED').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('Accepted', notif.title)
+        self.assertIn('Order confirmed by kitchen', notif.message)
+
+        # Email sent
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertIn(self.order.order_number, sent_email.subject)
+        self.assertIn('Accepted', sent_email.subject)
+        self.assertEqual(sent_email.to, [self.user.email])
+
+    def test_payment_confirmed_notification_and_email(self):
+        """12. Process validated payment creates payment confirmed notification and receipt email."""
+        from app.services.payment import create_payment, process_validated_payment
+        payment = create_payment(self.order, payment_method='SSLCOMMERZ')
+
+        val_data = {
+            'status': 'VALID',
+            'tran_id': payment.transaction_id,
+            'amount': str(payment.amount),
+            'currency': 'BDT',
+            'val_id': 'VAL_12345678',
+            'bank_tran_id': 'BANK_TX_999',
+            'card_type': 'VISA-City Bank',
+        }
+        with self.captureOnCommitCallbacks(execute=True):
+            success, result = process_validated_payment(val_data)
+        self.assertTrue(success)
+
+        notif = Notification.objects.filter(order=self.order, notification_type='PAYMENT_CONFIRMED').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('Payment Received', notif.title)
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertIn('Payment Confirmed', sent_email.subject)
+        self.assertIn(payment.transaction_id, sent_email.body)
+        self.assertEqual(sent_email.to, [self.user.email])
+
+    def test_payment_failed_notification_and_email(self):
+        """13. Process failed payment creates payment failed notification and failure email."""
+        from app.services.payment import create_payment, process_failed_payment
+        payment = create_payment(self.order, payment_method='SSLCOMMERZ')
+
+        with self.captureOnCommitCallbacks(execute=True):
+            process_failed_payment(payment.transaction_id, reason='Insufficient balance in account')
+
+        notif = Notification.objects.filter(order=self.order, notification_type='PAYMENT_FAILED').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('Payment Failed', notif.title)
+        self.assertIn('Insufficient balance', notif.message)
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertIn('Payment Failed', sent_email.subject)
+        self.assertIn('Insufficient balance in account', sent_email.body)
+        self.assertEqual(sent_email.to, [self.user.email])
+
+    def test_duplicate_event_key_idempotency(self):
+        """14. Repeated notifications for the same event key are deduplicated."""
+        from app.services.notification import notify_order_placed
+        notif1 = notify_order_placed(self.order)
+        self.assertEqual(len(mail.outbox), 1)
+
+        # Repeat call with identical event key
+        notif2 = notify_order_placed(self.order)
+        self.assertEqual(notif1.pk, notif2.pk)
+        self.assertEqual(Notification.objects.filter(order=self.order, notification_type='ORDER_PLACED').count(), 1)
+        # Email outbox remains at 1, no duplicate email sent
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_missing_recipient_email_gracefully_skipped(self):
+        """15. User without an email gets in-app notification without email crash."""
+        user_no_email = User.objects.create_user(username='no_email_user', password='Password123!', email='')
+        order_no_email = Order.objects.create(
+            user=user_no_email,
+            shipping_name='No Email User',
+            shipping_mobile='01700000000',
+            shipping_locality='Locality',
+            shipping_city='City',
+            shipping_zipcode='1200',
+            shipping_state='State',
+            subtotal=Decimal('100.00'),
+            total_discount=Decimal('0.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('170.00'),
+        )
+        from app.services.notification import notify_order_placed
+        notif = notify_order_placed(order_no_email)
+        self.assertIsNotNone(notif)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_email_exception_resilience(self):
+        """16. Email transport failures are caught gracefully and do not crash workflows."""
+        from app.services.notification import notify_order_placed
+        with patch('django.core.mail.EmailMultiAlternatives.send') as mock_send:
+            mock_send.side_effect = Exception("SMTP connection refused")
+            # Should not raise exception
+            notif = notify_order_placed(self.order)
+            self.assertIsNotNone(notif)
+            self.assertTrue(Notification.objects.filter(pk=notif.pk).exists())
+
+    def test_admin_notification_list_and_actions(self):
+        """17. Admin can view notification changelist and trigger mark read/unread actions."""
+        notif = Notification.objects.create(
+            recipient=self.user,
+            title='Admin Action Test',
+            message='Content',
+            is_read=False
+        )
+        self.client.login(username=self.staff_user.username, password=self.password)
+
+        # Admin changelist view
+        resp = self.client.get('/admin/app/notification/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'Admin Action Test')
+
+        # Admin mark read action
+        post_data = {
+            'action': 'mark_as_read',
+            '_selected_action': [str(notif.pk)],
+        }
+        action_resp = self.client.post('/admin/app/notification/', post_data)
+        self.assertEqual(action_resp.status_code, 302)
+        notif.refresh_from_db()
+        self.assertTrue(notif.is_read)
+        self.assertIsNotNone(notif.read_at)
+
+        # Admin mark unread action
+        post_unread = {
+            'action': 'mark_as_unread',
+            '_selected_action': [str(notif.pk)],
+        }
+        action_unread_resp = self.client.post('/admin/app/notification/', post_unread)
+        self.assertEqual(action_unread_resp.status_code, 302)
+        notif.refresh_from_db()
+        self.assertFalse(notif.is_read)
+        self.assertIsNone(notif.read_at)
+
+
+
+
+
 
 

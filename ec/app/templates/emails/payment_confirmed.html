@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Payment Confirmed #{{ order.order_number }}</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #198754; color: white; padding: 20px; text-align: center; border-radius: 6px 6px 0 0;">
+        <h2 style="margin: 0;">Payment Received</h2>
+    </div>
+    <div style="border: 1px solid #dee2e6; border-top: none; padding: 20px; border-radius: 0 0 6px 6px;">
+        <p>Dear {{ order.user.username }},</p>
+        <p>We have successfully received your payment of <strong>৳{{ payment.amount }} {{ payment.currency }}</strong> for order <strong>#{{ order.order_number }}</strong>.</p>
+        <p><strong>Transaction ID:</strong> {{ payment.transaction_id }}</p>
+        <p><strong>Payment Method:</strong> {{ payment.payment_method }}</p>
+        <p>Your order is now being processed.</p>
+        <hr style="border: none; border-top: 1px solid #dee2e6; margin: 20px 0;">
+        <p style="font-size: 0.9em; color: #6c757d; text-align: center;">Thank you for your business!</p>
+    </div>
+</body>
+</html>
+

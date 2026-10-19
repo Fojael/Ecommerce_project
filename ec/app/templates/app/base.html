@@ -69,7 +69,12 @@
           <li><a class="dropdown-item" href="{% url 'profile' %}">Profile</a></li>
           <li><a class="dropdown-item" href="{% url 'address' %}">Address</a></li>
           <li><a class="dropdown-item" href="{% url 'orders' %}">Orders</a></li>
+          <li><a class="dropdown-item" href="{% url 'notifications' %}">Notifications {% if unread_notifications_count > 0 %}<span class="badge bg-danger rounded-pill">{{ unread_notifications_count }}</span>{% endif %}</a></li>
           <li><a class="dropdown-item" href="#">Change Password</a></li>
+          {% if request.user.is_staff %}
+          <li><hr class="dropdown-divider"></li>
+          <li><a class="dropdown-item text-primary fw-bold" href="{% url 'staff-orders' %}"><i class="bi bi-box-seam me-1"></i>Staff Orders</a></li>
+          {% endif %}
           <li><hr class="dropdown-divider"></li>
           <li>
             <form action="{% url 'logout' %}" method="post" class="m-0 p-0">
@@ -78,6 +83,14 @@
             </form>
           </li>
         </ul>
+      </li>
+      <li class="nav-item mx-2">
+        <a href="{% url 'notifications' %}" class="nav-link text-white position-relative" title="Notifications">
+          Notifications
+          {% if unread_notifications_count > 0 %}
+          <span class="badge bg-danger rounded-pill">{{ unread_notifications_count }}</span>
+          {% endif %}
+        </a>
       </li>
       <li class="nav-item mx-2">
         <a href="{% url 'show-cart' %}" class="nav-link text-white">Cart <span class="badge bg-warning text-dark">{{ cart_item_count }}</span></a>

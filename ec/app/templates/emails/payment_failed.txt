@@ -1,0 +1,13 @@
+Payment Failed #{{ order.order_number }}
+
+Dear {{ order.user.username }},
+
+Your payment attempt for order #{{ order.order_number }} could not be completed.
+{% if reason %}
+Reason: {{ reason }}
+{% endif %}
+
+You can retry paying for your order from your orders page.
+
+If you need assistance, please contact customer support.
+

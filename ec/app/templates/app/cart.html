@@ -31,6 +31,13 @@
                             <p class="text-success small mb-0 fw-semibold">
                                 Subtotal: ৳ {{ item.item_subtotal }}
                             </p>
+                            {% if item.product.is_out_of_stock %}
+                            <div class="mt-1"><span class="badge bg-danger small">Out of stock (0 available)</span></div>
+                            {% elif item.quantity > item.product.stock %}
+                            <div class="mt-1"><span class="badge bg-danger small">Requested {{ item.quantity }}, only {{ item.product.stock }} in stock</span></div>
+                            {% elif item.product.is_low_stock %}
+                            <div class="mt-1"><span class="badge bg-warning text-dark small">Low stock: {{ item.product.stock }} left</span></div>
+                            {% endif %}
                         </div>
 
                         <!-- Quantity Controls -->
@@ -115,9 +122,18 @@
 
                     <!-- Checkout button -->
                     <div class="d-grid mb-2">
+                        {% if has_stock_error %}
+                        <div class="alert alert-danger small p-2 mb-2 text-center">
+                            Please adjust quantities for items exceeding stock before proceeding.
+                        </div>
+                        <button class="btn btn-secondary btn-lg" disabled title="Adjust quantities to proceed">
+                            Proceed to Checkout
+                        </button>
+                        {% else %}
                         <a href="{% url 'checkout' %}" class="btn btn-success btn-lg">
                             Proceed to Checkout
                         </a>
+                        {% endif %}
                     </div>
                 </div>
             </div>

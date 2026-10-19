@@ -31,7 +31,13 @@ urlpatterns = [
     path('place-order/', views.PlaceOrderView.as_view(), name='place-order'),
     path('orders/', views.OrderListView.as_view(), name='orders'),
     path('orders/<int:pk>/', views.OrderDetailView.as_view(), name='order-detail'),
+    path('orders/<int:pk>/cancel/', views.OrderCancelView.as_view(), name='order-cancel'),
     path('orders/<int:pk>/confirmation/', views.OrderConfirmationView.as_view(), name='order-confirmation'),
+
+    # Staff Fulfillment URLs
+    path('staff/orders/', views.StaffOrderQueueView.as_view(), name='staff-orders'),
+    path('staff/orders/<int:pk>/', views.StaffOrderDetailView.as_view(), name='staff-order-detail'),
+    path('staff/orders/<int:pk>/transition/', views.StaffOrderTransitionView.as_view(), name='staff-order-transition'),
 
     # Payment URLs
     path('payments/sslcommerz/initiate/<int:order_id>/', views.SSLCommerzInitiateView.as_view(), name='sslcommerz-initiate'),
@@ -39,6 +45,11 @@ urlpatterns = [
     path('payments/sslcommerz/fail/', views.SSLCommerzFailView.as_view(), name='sslcommerz-fail'),
     path('payments/sslcommerz/cancel/', views.SSLCommerzCancelView.as_view(), name='sslcommerz-cancel'),
     path('payments/sslcommerz/ipn/', views.SSLCommerzIPNView.as_view(), name='sslcommerz-ipn'),
+
+    # Customer Notification URLs
+    path('notifications/', views.NotificationListView.as_view(), name='notifications'),
+    path('notifications/<int:pk>/read/', views.NotificationMarkReadView.as_view(), name='notification-mark-read'),
+    path('notifications/mark-all-read/', views.NotificationMarkAllReadView.as_view(), name='notification-mark-all-read'),
     
     # login authentication
     path('customerregistration/', views.CustomerRegistrationView.as_view(), name='customerregistration'),

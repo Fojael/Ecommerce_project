@@ -1,0 +1,13 @@
+Order Status Update #{{ order.order_number }}
+
+Dear {{ order.user.username }},
+
+Your order #{{ order.order_number }} status has been updated to: {{ new_status }}.
+{% if notes %}
+Note: {{ notes }}
+{% endif %}
+
+Order Total: ৳{{ order.total_amount }}
+
+You can track your order status anytime on your account orders page.
+

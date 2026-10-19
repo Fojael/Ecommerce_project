@@ -1,0 +1,12 @@
+Payment Confirmed #{{ order.order_number }}
+
+Dear {{ order.user.username }},
+
+We have successfully received your payment of ৳{{ payment.amount }} {{ payment.currency }} for order #{{ order.order_number }}.
+Transaction ID: {{ payment.transaction_id }}
+Payment Method: {{ payment.payment_method }}
+
+Your order is now being processed.
+
+Thank you for your business!
+

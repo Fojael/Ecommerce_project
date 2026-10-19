@@ -20,6 +20,12 @@
                 <a href="{% url 'orders' %}" class="list-group-item list-group-item-action active">
                     My Orders
                 </a>
+                <a href="{% url 'notifications' %}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                    Notifications
+                    {% if unread_notifications_count > 0 %}
+                    <span class="badge bg-danger rounded-pill">{{ unread_notifications_count }}</span>
+                    {% endif %}
+                </a>
             </div>
         </div>
 
