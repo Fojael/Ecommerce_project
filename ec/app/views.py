@@ -1,6 +1,8 @@
 import logging
 from decimal import Decimal
-from django.db import transaction
+from django.db import transaction, IntegrityError, OperationalError
+from django.utils import timezone
+from django.core.paginator import Paginator
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views import View
 
@@ -15,14 +17,25 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from .models import (
     Product, Customer, Cart, CartItem, Order, OrderItem, Payment, StockAdjustment, OrderStatusHistory,
-    ORDER_STATUS_CHOICES, Notification
+    ORDER_STATUS_CHOICES, Notification, WishlistItem, ProductReview
 )
 from .services.notification import (
     mark_notification_as_read,
     mark_all_notifications_as_read,
     get_unread_notifications_count,
 )
-from .forms import CustomerRegistrationForm, CustomerProfileForm, LoginForm
+from .forms import CustomerRegistrationForm, CustomerProfileForm, LoginForm, ProductReviewForm
+from .services.review import can_user_review_product, get_product_review_summary
+from .services.catalog import (
+    clean_catalog_params,
+    get_catalog_queryset,
+    paginate_catalog,
+    build_preserved_query_params,
+    get_active_filters,
+    SORT_OPTIONS,
+    CATEGORY_CHOICES,
+    CATEGORY_MAP,
+)
 from .services.sslcommerz import initiate_sslcommerz_payment, validate_sslcommerz_transaction
 from .services.payment import (
     create_payment,
@@ -52,11 +65,51 @@ def about(request):
 def contact(request):
     return render(request, 'app/contact.html')
 
-class CategoryView(View):
-    def get(self, request, val):
-        product = Product.objects.filter(category=val)
-        title = Product.objects.filter(category=val).values('title')
-        return render(request, 'app/category.html', {'product': product, 'title': title})
+class ProductCatalogView(View):
+    def get(self, request, val=None):
+        cleaned_params = clean_catalog_params(request.GET, base_category=val)
+        queryset = get_catalog_queryset(cleaned_params)
+        page_obj, paginator = paginate_catalog(queryset, cleaned_params['page'])
+        preserved_query = build_preserved_query_params(request.GET)
+        active_filters = get_active_filters(cleaned_params)
+
+        cat_code = cleaned_params.get('category')
+        if cat_code:
+            title = Product.objects.filter(category=cat_code).values('title')
+            category_title_display = CATEGORY_MAP.get(cat_code, cat_code)
+        else:
+            title = Product.objects.all().values('title')[:20]
+            category_title_display = 'All Products'
+
+        context = {
+            'product': page_obj,
+            'products': page_obj,
+            'page_obj': page_obj,
+            'paginator': paginator,
+            'is_paginated': paginator.num_pages > 1,
+            'title': title,
+            'categories': CATEGORY_CHOICES,
+            'cleaned_params': cleaned_params,
+            'search_query': cleaned_params['q'],
+            'selected_category': cleaned_params['category'],
+            'min_price': cleaned_params['min_price'],
+            'max_price': cleaned_params['max_price'],
+            'in_stock': cleaned_params['in_stock'],
+            'selected_rating': cleaned_params['rating'],
+            'selected_sort': cleaned_params['sort'],
+            'sort_options': SORT_OPTIONS,
+            'preserved_query_params': preserved_query,
+            'active_filters': active_filters,
+            'total_count': paginator.count,
+            'filter_errors': cleaned_params.get('errors', []),
+            'category_title_display': category_title_display,
+        }
+        return render(request, 'app/category.html', context)
+
+
+class CategoryView(ProductCatalogView):
+    pass
+
 
 class CategoryTitle(View):
     def get(self, request, val):
@@ -65,14 +118,64 @@ class CategoryTitle(View):
             title = Product.objects.filter(category=product[0].category).values('title')
         else:
             title = []
-        return render(request, 'app/category.html', {'product': product, 'title': title})    
+        return render(request, 'app/category.html', {
+            'product': product,
+            'products': product,
+            'title': title,
+            'categories': CATEGORY_CHOICES,
+            'category_title_display': val,
+            'total_count': product.count(),
+            'cleaned_params': {'q': '', 'category': '', 'min_price': None, 'max_price': None, 'in_stock': False, 'rating': None, 'sort': 'newest'},
+            'sort_options': SORT_OPTIONS,
+            'preserved_query_params': '',
+            'active_filters': [],
+            'filter_errors': [],
+        })    
     
 class ProductDetail(View):
     def get(self, request, pk):
         product = get_object_or_404(Product, pk=pk)
-        return render(request, 'app/productdetail.html', {'product': product})    
-    
-    
+        approved_reviews = product.reviews.filter(status='APPROVED').select_related('user').order_by('-created_at')
+
+        review_summary = get_product_review_summary(product)
+        reviews_count = review_summary['count']
+        avg_rating = review_summary['average_rating']
+
+        paginator = Paginator(approved_reviews, 5)
+        page_number = request.GET.get('page')
+        reviews_page = paginator.get_page(page_number)
+
+        user_review = None
+        can_review = False
+        ineligible_reason = ''
+        review_form = None
+        in_wishlist = False
+
+        if request.user.is_authenticated:
+            user_review = product.reviews.filter(user=request.user).first()
+            can_review, ineligible_reason = can_user_review_product(request.user, product)
+            if user_review:
+                review_form = ProductReviewForm(instance=user_review)
+            elif can_review:
+                review_form = ProductReviewForm()
+            in_wishlist = WishlistItem.objects.filter(user=request.user, product=product).exists()
+        else:
+            ineligible_reason = "Please log in to write a review."
+
+        return render(request, 'app/productdetail.html', {
+            'product': product,
+            'reviews': reviews_page,
+            'reviews_count': reviews_count,
+            'avg_rating': avg_rating,
+            'can_review': can_review,
+            'ineligible_reason': ineligible_reason,
+            'user_review': user_review,
+            'review_form': review_form,
+            'in_wishlist': in_wishlist,
+        })
+
+
+
 class CustomerRegistrationView(View):
     def get(self, request):
         if request.user.is_authenticated:
@@ -190,11 +293,16 @@ class ShowCartView(LoginRequiredMixin, View):
                 "Some items in your cart exceed available stock. Please adjust quantities before proceeding to checkout."
             )
 
+        delivery_charge = 70.00 if cart_items else 0.00
+        estimated_total = round(cart_subtotal + delivery_charge, 2) if cart_items else 0.00
+
         return render(request, 'app/cart.html', {
             'cart': cart,
             'cart_items': cart_items,
             'cart_subtotal': round(cart_subtotal, 2),
             'total_discount': round(total_discount, 2),
+            'delivery_charge': round(delivery_charge, 2),
+            'estimated_total': estimated_total,
             'has_stock_error': has_stock_error,
         })
 
@@ -223,6 +331,9 @@ class PlusCartView(LoginRequiredMixin, View):
                     cart_item.save()
         return redirect('show-cart')
 
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+
 
 class MinusCartView(LoginRequiredMixin, View):
     def post(self, request):
@@ -245,6 +356,9 @@ class MinusCartView(LoginRequiredMixin, View):
                     cart_item.delete()
         return redirect('show-cart')
 
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+
 
 class RemoveCartView(LoginRequiredMixin, View):
     def post(self, request):
@@ -262,6 +376,60 @@ class RemoveCartView(LoginRequiredMixin, View):
             if cart_item:
                 cart_item.delete()
         return redirect('show-cart')
+
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class UpdateCartView(LoginRequiredMixin, View):
+    def post(self, request):
+        item_id = request.POST.get('item_id')
+        prod_id = request.POST.get('prod_id')
+        raw_qty = request.POST.get('quantity')
+        cart = Cart.objects.filter(user=request.user).first()
+        if not cart:
+            return redirect('show-cart')
+
+        if item_id:
+            cart_item = CartItem.objects.select_related('product').filter(id=item_id, cart=cart).first()
+        elif prod_id:
+            cart_item = CartItem.objects.select_related('product').filter(product_id=prod_id, cart=cart).first()
+        else:
+            cart_item = None
+
+        if not cart_item:
+            messages.error(request, "Item not found in your cart.")
+            return redirect('show-cart')
+
+        try:
+            new_qty = int(raw_qty)
+        except (ValueError, TypeError):
+            messages.error(request, "Quantity must be a valid whole number.")
+            return redirect('show-cart')
+
+        if new_qty < 0:
+            messages.error(request, "Quantity cannot be negative.")
+            return redirect('show-cart')
+        elif new_qty == 0:
+            title = cart_item.product.title
+            cart_item.delete()
+            messages.info(request, f"'{title}' was removed from your cart.")
+            return redirect('show-cart')
+
+        if new_qty > cart_item.product.stock:
+            messages.warning(
+                request,
+                f"Cannot set quantity to {new_qty}. Only {cart_item.product.stock} available in stock for '{cart_item.product.title}'."
+            )
+            return redirect('show-cart')
+
+        cart_item.quantity = new_qty
+        cart_item.save()
+        messages.success(request, f"Updated quantity for '{cart_item.product.title}' to {new_qty}.")
+        return redirect('show-cart')
+
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
 
 
 class CheckoutView(LoginRequiredMixin, View):
@@ -319,101 +487,127 @@ class PlaceOrderView(LoginRequiredMixin, View):
             messages.warning(request, "Incomplete shipping address. Please update your profile.")
             return redirect('profile')
 
-        with transaction.atomic():
-            cart = Cart.objects.select_for_update().filter(user=request.user).first()
-            cart_items = list(cart.items.select_related('product').all()) if cart else []
-            if not cart_items:
-                messages.warning(request, "Your cart is empty.")
-                return redirect('show-cart')
-
-            # Pre-validate stock for every item before creating the order
-            for item in cart_items:
-                if item.quantity <= 0:
-                    messages.error(request, "Invalid item quantity in cart.")
-                    return redirect('show-cart')
-                product = Product.objects.select_for_update().get(id=item.product.id)
-                if product.stock < item.quantity or product.stock <= 0:
-                    messages.error(
-                        request,
-                        f"Cannot place order: '{product.title}' only has {product.stock} available in stock, but your cart has {item.quantity}."
-                    )
+        try:
+            with transaction.atomic():
+                cart = Cart.objects.select_for_update().filter(user=request.user).first()
+                if not cart:
+                    messages.warning(request, "Your cart is empty.")
                     return redirect('show-cart')
 
-            subtotal = Decimal('0.00')
-            total_discount = Decimal('0.00')
-            delivery_charge = Decimal('70.00')
-            order_items_data = []
+                # Force immediate write lock in SQLite & row lock in PostgreSQL
+                Cart.objects.filter(id=cart.id).update(updated_at=timezone.now())
 
-            for item in cart_items:
-                product = Product.objects.select_for_update().get(id=item.product.id)
-                sp = Decimal(str(product.selling_price))
-                dp = Decimal(str(product.discounted_price))
-                item_subtotal = dp * item.quantity
-                item_discount = (sp - dp) * item.quantity
-                subtotal += item_subtotal
-                total_discount += item_discount
-                order_items_data.append({
-                    'product': product,
-                    'product_name': product.title,
-                    'unit_price': dp,
-                    'quantity': item.quantity,
-                    'subtotal': item_subtotal,
-                })
+                # Re-read cart items freshly after acquiring transaction write lock
+                cart_items = list(CartItem.objects.select_for_update().filter(cart=cart).select_related('product'))
+                if not cart_items:
+                    messages.warning(request, "Your cart is empty.")
+                    return redirect('show-cart')
 
-            grand_total = subtotal + delivery_charge
+                # Pre-validate stock for every item before creating the order
+                for item in cart_items:
+                    if item.quantity <= 0:
+                        messages.error(request, "Invalid item quantity in cart.")
+                        return redirect('show-cart')
+                    product = Product.objects.select_for_update().get(id=item.product.id)
+                    if product.stock < item.quantity or product.stock <= 0:
+                        messages.error(
+                            request,
+                            f"Cannot place order: '{product.title}' only has {product.stock} available in stock, but your cart has {item.quantity}."
+                        )
+                        return redirect('show-cart')
 
-            order = Order.objects.create(
-                user=request.user,
-                shipping_name=customer.name,
-                shipping_mobile=customer.mobile,
-                shipping_locality=customer.locality,
-                shipping_city=customer.city,
-                shipping_zipcode=str(customer.zipcode),
-                shipping_state=customer.state,
-                subtotal=subtotal,
-                total_discount=total_discount,
-                delivery_charge=delivery_charge,
-                grand_total=grand_total,
-                status='PENDING',
-                payment_status='PENDING',
-                stock_deducted=False,
-                stock_restored=False,
-            )
+                subtotal = Decimal('0.00')
+                total_discount = Decimal('0.00')
+                delivery_charge = Decimal('70.00')
+                order_items_data = []
 
-            for oi in order_items_data:
-                OrderItem.objects.create(
-                    order=order,
-                    product=oi['product'],
-                    product_name=oi['product_name'],
-                    unit_price=oi['unit_price'],
-                    quantity=oi['quantity'],
-                    subtotal=oi['subtotal'],
+                for item in cart_items:
+                    product = Product.objects.select_for_update().get(id=item.product.id)
+                    sp = Decimal(str(product.selling_price))
+                    dp = Decimal(str(product.discounted_price))
+                    item_subtotal = dp * item.quantity
+                    item_discount = (sp - dp) * item.quantity
+                    subtotal += item_subtotal
+                    total_discount += item_discount
+                    order_items_data.append({
+                        'product': product,
+                        'product_name': product.title,
+                        'unit_price': dp,
+                        'quantity': item.quantity,
+                        'subtotal': item_subtotal,
+                    })
+
+                grand_total = subtotal + delivery_charge
+
+                # Support custom shipping snapshot from checkout form or fallback to customer profile
+                shipping_name = (request.POST.get('shipping_name') or '').strip() or customer.name
+                shipping_mobile = (request.POST.get('shipping_mobile') or '').strip() or customer.mobile
+                shipping_locality = (request.POST.get('shipping_locality') or '').strip() or customer.locality
+                shipping_city = (request.POST.get('shipping_city') or '').strip() or customer.city
+                shipping_state = (request.POST.get('shipping_state') or '').strip() or customer.state
+                shipping_zipcode = (request.POST.get('shipping_zipcode') or '').strip() or str(customer.zipcode)
+
+                if not shipping_name or not shipping_mobile or not shipping_locality or not shipping_city or not shipping_state:
+                    messages.error(request, "All shipping address fields are required.")
+                    return redirect('checkout')
+
+                order = Order.objects.create(
+                    user=request.user,
+                    shipping_name=shipping_name,
+                    shipping_mobile=shipping_mobile,
+                    shipping_locality=shipping_locality,
+                    shipping_city=shipping_city,
+                    shipping_zipcode=shipping_zipcode,
+                    shipping_state=shipping_state,
+                    subtotal=subtotal,
+                    total_discount=total_discount,
+                    delivery_charge=delivery_charge,
+                    grand_total=grand_total,
+                    status='PENDING',
+                    payment_status='PENDING',
+                    stock_deducted=False,
+                    stock_restored=False,
                 )
 
-            # Deduct stock atomically and record audit adjustment
-            deduct_order_stock(order, user=request.user)
+                for oi in order_items_data:
+                    OrderItem.objects.create(
+                        order=order,
+                        product=oi['product'],
+                        product_name=oi['product_name'],
+                        unit_price=oi['unit_price'],
+                        quantity=oi['quantity'],
+                        subtotal=oi['subtotal'],
+                    )
 
-            # Create payment record (COD or SSLCOMMERZ)
-            payment_method = request.POST.get('payment_method', 'COD').upper()
-            if payment_method not in ('COD', 'SSLCOMMERZ'):
-                payment_method = 'COD'
-            payment = create_payment(order, payment_method=payment_method)
+                # Deduct stock atomically and record audit adjustment
+                deduct_order_stock(order, user=request.user)
 
-            # Clear cart only after successful order and order items creation
-            cart.items.all().delete()
+                # Create payment record (COD or SSLCOMMERZ)
+                payment_method = request.POST.get('payment_method', 'COD').upper()
+                if payment_method not in ('COD', 'SSLCOMMERZ'):
+                    payment_method = 'COD'
+                payment = create_payment(order, payment_method=payment_method)
 
-            # Record initial order status history
-            OrderStatusHistory.objects.create(
-                order=order,
-                from_status='PENDING',
-                to_status='PENDING',
-                changed_by=request.user,
-                notes='Order placed'
-            )
+                # Clear cart only after successful order and order items creation
+                cart.items.all().delete()
 
-            from app.services.notification import notify_order_placed
-            order_to_notify = order
-            transaction.on_commit(lambda: notify_order_placed(order_to_notify))
+                # Record initial order status history
+                OrderStatusHistory.objects.create(
+                    order=order,
+                    from_status='PENDING',
+                    to_status='PENDING',
+                    changed_by=request.user,
+                    notes='Order placed'
+                )
+
+                from app.services.notification import notify_order_placed
+                order_to_notify = order
+                transaction.on_commit(lambda: notify_order_placed(order_to_notify))
+
+        except OperationalError:
+            # Handle SQLite / database concurrency locks gracefully
+            messages.warning(request, "A temporary database lock occurred. Please check your order history.")
+            return redirect('show-cart')
 
         if payment_method == 'SSLCOMMERZ':
             initiate_result = initiate_sslcommerz_payment(payment, request)
@@ -772,3 +966,124 @@ class NotificationMarkAllReadView(LoginRequiredMixin, View):
     def get(self, request):
         return HttpResponseNotAllowed(['POST'])
 
+
+
+# ================= WISHLIST VIEWS =================
+class WishlistListView(LoginRequiredMixin, View):
+    def get(self, request):
+        wishlist_items = WishlistItem.objects.filter(user=request.user).select_related('product')
+        return render(request, 'app/wishlist.html', {
+            'wishlist_items': wishlist_items
+        })
+
+
+class AddToWishlistView(LoginRequiredMixin, View):
+    def post(self, request):
+        prod_id = request.POST.get('prod_id')
+        if not prod_id:
+            messages.error(request, "Invalid product specified.")
+            return redirect('home')
+
+        product = get_object_or_404(Product, id=prod_id)
+
+        try:
+            with transaction.atomic():
+                item, created = WishlistItem.objects.get_or_create(user=request.user, product=product)
+            if created:
+                messages.success(request, f"'{product.title}' has been added to your wishlist.")
+            else:
+                messages.info(request, f"'{product.title}' is already in your wishlist.")
+        except IntegrityError:
+            messages.info(request, f"'{product.title}' is already in your wishlist.")
+
+        next_url = request.POST.get('next') or request.META.get('HTTP_REFERER') or reverse('wishlist')
+        return redirect(next_url)
+
+    def get(self, request):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class RemoveFromWishlistView(LoginRequiredMixin, View):
+    def post(self, request, pk=None):
+        item_id = request.POST.get('item_id')
+        prod_id = request.POST.get('prod_id')
+
+        # Strictly enforce user ownership - only delete rows belonging to request.user
+        deleted_count = 0
+        if pk:
+            deleted_count, _ = WishlistItem.objects.filter(pk=pk, user=request.user).delete()
+        elif item_id:
+            deleted_count, _ = WishlistItem.objects.filter(id=item_id, user=request.user).delete()
+        elif prod_id:
+            deleted_count, _ = WishlistItem.objects.filter(product_id=prod_id, user=request.user).delete()
+
+        if deleted_count > 0:
+            messages.success(request, "Item removed from your wishlist.")
+        else:
+            messages.info(request, "Item not found in your wishlist.")
+
+        next_url = request.POST.get('next') or request.META.get('HTTP_REFERER') or reverse('wishlist')
+        return redirect(next_url)
+
+    def get(self, request, pk=None):
+        return HttpResponseNotAllowed(['POST'])
+
+
+# ================= PRODUCT REVIEW VIEWS =================
+class SubmitReviewView(LoginRequiredMixin, View):
+    def post(self, request, pk):
+        product = get_object_or_404(Product, pk=pk)
+        can_review, reason = can_user_review_product(request.user, product)
+        if not can_review:
+            messages.error(request, reason)
+            return redirect('product-detail', pk=product.pk)
+
+        existing_review = ProductReview.objects.filter(user=request.user, product=product).first()
+        if existing_review:
+            form = ProductReviewForm(request.POST, instance=existing_review)
+            if form.is_valid():
+                review = form.save(commit=False)
+                # Security: Author, product, and status cannot be overridden by client
+                review.user = request.user
+                review.product = product
+                review.status = 'PENDING'
+                review.save()
+                messages.success(request, "Your review has been updated and submitted for moderation.")
+            else:
+                for error_list in form.errors.values():
+                    for err in error_list:
+                        messages.error(request, err)
+        else:
+            form = ProductReviewForm(request.POST)
+            if form.is_valid():
+                try:
+                    with transaction.atomic():
+                        review = form.save(commit=False)
+                        review.user = request.user
+                        review.product = product
+                        review.status = 'PENDING'
+                        review.save()
+                    messages.success(request, "Thank you! Your review has been submitted for moderation.")
+                except IntegrityError:
+                    messages.warning(request, "You have already submitted a review for this product.")
+            else:
+                for error_list in form.errors.values():
+                    for err in error_list:
+                        messages.error(request, err)
+
+        return redirect('product-detail', pk=product.pk)
+
+    def get(self, request, pk):
+        return HttpResponseNotAllowed(['POST'])
+
+
+class DeleteReviewView(LoginRequiredMixin, View):
+    def post(self, request, pk):
+        review = get_object_or_404(ProductReview, pk=pk, user=request.user)
+        product_pk = review.product.pk
+        review.delete()
+        messages.success(request, "Your review has been deleted.")
+        return redirect('product-detail', pk=product_pk)
+
+    def get(self, request, pk):
+        return HttpResponseNotAllowed(['POST'])

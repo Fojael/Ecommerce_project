@@ -3,7 +3,7 @@ from django.db import models
 from django.utils import timezone
 from .models import (
     Customer, Product, Cart, CartItem, Order, OrderItem, Payment, StockAdjustment, OrderStatusHistory,
-    Notification
+    Notification, WishlistItem, ProductReview
 )
 from .services.inventory import adjust_stock, restore_order_stock
 from .services.fulfillment import (
@@ -382,3 +382,35 @@ class NotificationAdmin(admin.ModelAdmin):
         queryset.update(is_read=False, read_at=None)
 
 
+
+
+@admin.register(WishlistItem)
+class WishlistItemAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'product', 'created_at')
+    search_fields = ('user__username', 'product__title')
+    list_filter = ('created_at',)
+    readonly_fields = ('user', 'product', 'created_at')
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ProductReview)
+class ProductReviewAdmin(admin.ModelAdmin):
+    list_display = ('id', 'product', 'user', 'rating', 'title', 'status', 'created_at')
+    list_filter = ('status', 'rating', 'created_at')
+    search_fields = ('product__title', 'user__username', 'title', 'comment')
+    readonly_fields = ('user', 'product', 'created_at', 'updated_at')
+    actions = ['approve_reviews', 'reject_reviews', 'mark_pending']
+
+    @admin.action(description="Approve selected reviews")
+    def approve_reviews(self, request, queryset):
+        queryset.update(status='APPROVED')
+
+    @admin.action(description="Reject selected reviews")
+    def reject_reviews(self, request, queryset):
+        queryset.update(status='REJECTED')
+
+    @admin.action(description="Mark selected reviews as Pending")
+    def mark_pending(self, request, queryset):
+        queryset.update(status='PENDING')

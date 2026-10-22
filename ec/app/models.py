@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.validators import MinValueValidator, MaxValueValidator
 import uuid
 from django.utils import timezone
 from decimal import Decimal
@@ -67,6 +68,15 @@ class Product(models.Model):
 
     def __str__(self):
         return self.title
+
+    @property
+    def average_rating(self):
+        val = self.reviews.filter(status='APPROVED').aggregate(models.Avg('rating'))['rating__avg']
+        return round(float(val), 1) if val is not None else 0.0
+
+    @property
+    def review_count(self):
+        return self.reviews.filter(status='APPROVED').count()
 
 class Customer(models.Model):
     user = models.OneToOneField(
@@ -601,5 +611,96 @@ class Notification(models.Model):
     def __str__(self):
         status_flag = "Read" if self.is_read else "Unread"
         return f"[{status_flag}] {self.recipient.username}: {self.title} ({self.created_at:%Y-%m-%d %H:%M})"
+
+
+class WishlistItem(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='wishlist_items',
+        help_text="User who saved the product to their wishlist."
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='wishlist_items',
+        help_text="Product saved in wishlist."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'product'],
+                name='unique_user_product_wishlist'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.product.title}"
+
+
+REVIEW_STATUS_CHOICES = (
+    ('PENDING', 'Pending Moderation'),
+    ('APPROVED', 'Approved'),
+    ('REJECTED', 'Rejected'),
+)
+
+
+class ProductReview(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+        help_text="User who wrote the review."
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+        help_text="Product being reviewed."
+    )
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Rating score from 1 to 5."
+    )
+    title = models.CharField(
+        max_length=150,
+        blank=True,
+        default='',
+        help_text="Short headline summarizing the review."
+    )
+    comment = models.TextField(
+        help_text="Written review content."
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=REVIEW_STATUS_CHOICES,
+        default='PENDING',
+        help_text="Moderation approval status."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'product'],
+                name='unique_user_product_review'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rating__gte=1, rating__lte=5),
+                name='product_review_rating_range'
+            ),
+        ]
+
+    @property
+    def is_approved(self):
+        return self.status == 'APPROVED'
+
+    def __str__(self):
+        return f"{self.product.title} ({self.rating}★) by {self.user.username} [{self.status}]"
 
 

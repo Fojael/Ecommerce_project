@@ -4,12 +4,39 @@
 
 {% block main-content %}
 <div class="container my-5">
+    {% if messages %}
+        {% for msg in messages %}
+            <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-4" role="alert">
+                {{ msg }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
     <div class="row justify-content-between align-items-center">
         <div class="col-lg-5 text-center mb-4 mb-lg-0">
             <img src="{% if product.product_image %}{{ product.product_image.url }}{% endif %}" class="img-fluid rounded shadow-sm" style="max-height: 400px; object-fit: contain;" alt="{{ product.title }}">
         </div>
         <div class="col-lg-6">
-            <h1 class="fw-bold mb-3" style="font-family: Georgia;">{{ product.title }}</h1>
+            <h1 class="fw-bold mb-2" style="font-family: Georgia;">{{ product.title }}</h1>
+
+            <!-- Ratings Summary -->
+            <div class="mb-3 d-flex align-items-center gap-2">
+                <span class="text-warning fs-5">
+                    {% if avg_rating >= 4.5 %}★★★★★
+                    {% elif avg_rating >= 3.5 %}★★★★☆
+                    {% elif avg_rating >= 2.5 %}★★★☆☆
+                    {% elif avg_rating >= 1.5 %}★★☆☆☆
+                    {% elif avg_rating >= 0.5 %}★☆☆☆☆
+                    {% else %}☆☆☆☆☆
+                    {% endif %}
+                </span>
+                <span class="fw-bold fs-6">{{ avg_rating }} / 5.0</span>
+                <a href="#reviews-section" class="text-muted text-decoration-none fs-6">
+                    ({{ reviews_count }} review{{ reviews_count|pluralize }})
+                </a>
+            </div>
+
             <h4 class="text-danger fw-bold mb-1">
                 ৳ {{ product.discounted_price }}
                 {% if product.selling_price > product.discounted_price %}
@@ -37,7 +64,7 @@
             </div>
 
             <div class="buttons mt-4" style="font-family: Rajdhani;">
-                <form method="post" action="{% url 'add-to-cart' %}">
+                <form method="post" action="{% url 'add-to-cart' %}" class="d-inline">
                     {% csrf_token %}
                     <input type="hidden" name="prod_id" value="{{ product.id }}">
 
@@ -54,9 +81,197 @@
                         {% if product.is_out_of_stock %}Out of Stock{% else %}Add to Cart{% endif %}
                     </button>
                     {% if not product.is_out_of_stock %}
-                    <a href="#" class="btn btn-dark btn-lg text-white">Buy Now</a>
+                    <a href="#" class="btn btn-dark btn-lg text-white me-2">Buy Now</a>
                     {% endif %}
                 </form>
+
+                <!-- Wishlist Toggle -->
+                {% if request.user.is_authenticated %}
+                    {% if in_wishlist %}
+                    <form method="post" action="{% url 'remove-from-wishlist' %}" class="d-inline">
+                        {% csrf_token %}
+                        <input type="hidden" name="prod_id" value="{{ product.id }}">
+                        <input type="hidden" name="next" value="{{ request.path }}">
+                        <button type="submit" class="btn btn-outline-danger btn-lg" title="Remove from Wishlist">
+                            &hearts; In Wishlist
+                        </button>
+                    </form>
+                    {% else %}
+                    <form method="post" action="{% url 'add-to-wishlist' %}" class="d-inline">
+                        {% csrf_token %}
+                        <input type="hidden" name="prod_id" value="{{ product.id }}">
+                        <input type="hidden" name="next" value="{{ request.path }}">
+                        <button type="submit" class="btn btn-outline-secondary btn-lg" title="Save to Wishlist">
+                            &#9825; Add to Wishlist
+                        </button>
+                    </form>
+                    {% endif %}
+                {% else %}
+                    <a href="{% url 'login' %}?next={{ request.path }}" class="btn btn-outline-secondary btn-lg" title="Log in to add to wishlist">
+                        &#9825; Add to Wishlist
+                    </a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- REVIEWS & RATINGS SECTION -->
+    <hr class="my-5" id="reviews-section">
+
+    <div class="row g-4">
+        <!-- Review Form / Eligibility Column -->
+        <div class="col-lg-5">
+            <div class="card shadow-sm border-0 h-100">
+                <div class="card-header bg-white py-3 border-bottom">
+                    <h5 class="mb-0 fw-bold">
+                        {% if user_review %}
+                            Edit Your Review
+                        {% else %}
+                            Write a Review
+                        {% endif %}
+                    </h5>
+                </div>
+                <div class="card-body p-4">
+                    {% if user_review or can_review %}
+                        <form method="post" action="{% url 'submit-review' product.id %}">
+                            {% csrf_token %}
+                            <div class="mb-3">
+                                <label for="reviewRating" class="form-label fw-bold">Rating <span class="text-danger">*</span></label>
+                                {{ review_form.rating }}
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="reviewTitle" class="form-label fw-bold">Review Headline</label>
+                                {{ review_form.title }}
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="reviewComment" class="form-label fw-bold">Detailed Review <span class="text-danger">*</span></label>
+                                {{ review_form.comment }}
+                            </div>
+
+                            <button type="submit" class="btn btn-primary w-100 py-2">
+                                {% if user_review %}
+                                    Update Review
+                                {% else %}
+                                    Submit Review
+                                {% endif %}
+                            </button>
+                        </form>
+
+                        {% if user_review %}
+                        <form method="post" action="{% url 'delete-review' user_review.id %}" class="mt-2 text-center">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-sm btn-link text-danger text-decoration-none" onclick="return confirm('Are you sure you want to delete your review?');">
+                                Delete Your Review
+                            </button>
+                        </form>
+                        {% endif %}
+
+                    {% elif request.user.is_authenticated %}
+                        <div class="alert alert-info mb-0">
+                            <h6 class="alert-heading fw-bold mb-2">Verified Purchasers Only</h6>
+                            <p class="mb-0 small text-secondary">
+                                {{ ineligible_reason }}
+                            </p>
+                        </div>
+                    {% else %}
+                        <div class="alert alert-light border mb-0 text-center py-4">
+                            <p class="mb-3 text-secondary">Please log in to write a review for this product.</p>
+                            <a href="{% url 'login' %}?next={{ request.path }}" class="btn btn-outline-primary btn-sm">
+                                Log In to Review
+                            </a>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Approved Reviews List Column -->
+        <div class="col-lg-7">
+            <div class="card shadow-sm border-0 h-100">
+                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0 fw-bold">Customer Reviews</h5>
+                    <span class="badge bg-secondary">{{ reviews_count }} review{{ reviews_count|pluralize }}</span>
+                </div>
+                <div class="card-body p-4">
+                    {% if reviews %}
+                        <div class="list-group list-group-flush">
+                            {% for rev in reviews %}
+                            <div class="list-group-item px-0 py-3 border-bottom">
+                                <div class="d-flex justify-content-between align-items-start mb-1">
+                                    <div>
+                                        <span class="text-warning fs-6">
+                                            {% if rev.rating == 5 %}★★★★★
+                                            {% elif rev.rating == 4 %}★★★★☆
+                                            {% elif rev.rating == 3 %}★★★☆☆
+                                            {% elif rev.rating == 2 %}★★☆☆☆
+                                            {% else %}★☆☆☆☆
+                                            {% endif %}
+                                        </span>
+                                        {% if rev.title %}
+                                        <strong class="ms-2 text-dark">{{ rev.title }}</strong>
+                                        {% endif %}
+                                    </div>
+                                    <small class="text-muted">{{ rev.created_at|date:"M d, Y" }}</small>
+                                </div>
+
+                                <div class="mb-2">
+                                    <small class="text-muted">by <strong>{{ rev.user.username|capfirst }}</strong></small>
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle ms-2 py-0 px-2" style="font-size: 0.75rem;">
+                                        &#10003; Verified Purchase
+                                    </span>
+                                    {% if request.user == rev.user %}
+                                    <span class="badge bg-primary ms-1 py-0 px-2" style="font-size: 0.75rem;">Your Review</span>
+                                    {% endif %}
+                                </div>
+
+                                <p class="mb-0 text-secondary" style="white-space: pre-line;">{{ rev.comment }}</p>
+                            </div>
+                            {% endfor %}
+                        </div>
+
+                        <!-- Pagination -->
+                        {% if reviews.has_other_pages %}
+                        <nav aria-label="Review page navigation" class="mt-4">
+                            <ul class="pagination pagination-sm justify-content-center mb-0">
+                                {% if reviews.has_previous %}
+                                <li class="page-item">
+                                    <a class="page-link" href="?page={{ reviews.previous_page_number }}#reviews-section">&laquo; Prev</a>
+                                </li>
+                                {% else %}
+                                <li class="page-item disabled"><span class="page-link">&laquo; Prev</span></li>
+                                {% endif %}
+
+                                {% for num in reviews.paginator.page_range %}
+                                    {% if reviews.number == num %}
+                                    <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+                                    {% else %}
+                                    <li class="page-item"><a class="page-link" href="?page={{ num }}#reviews-section">{{ num }}</a></li>
+                                    {% endif %}
+                                {% endfor %}
+
+                                {% if reviews.has_next %}
+                                <li class="page-item">
+                                    <a class="page-link" href="?page={{ reviews.next_page_number }}#reviews-section">Next &raquo;</a>
+                                </li>
+                                {% else %}
+                                <li class="page-item disabled"><span class="page-link">Next &raquo;</span></li>
+                                {% endif %}
+                            </ul>
+                        </nav>
+                        {% endif %}
+
+                    {% else %}
+                        <div class="text-center py-5">
+                            <div class="mb-2 text-muted fs-1">&#9734;</div>
+                            <h6 class="fw-bold text-muted">No Reviews Yet</h6>
+                            <p class="text-secondary small mb-0">
+                                Be the first verified customer to share your thoughts on this product!
+                            </p>
+                        </div>
+                    {% endif %}
+                </div>
             </div>
         </div>
     </div>

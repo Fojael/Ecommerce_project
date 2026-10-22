@@ -1,0 +1,144 @@
+{% extends "app/base.html" %}
+{% load static %}
+{% block title %}My Wishlist{% endblock title %}
+
+{% block main-content %}
+<div class="container my-5">
+    <div class="row">
+        <!-- LEFT SIDEBAR -->
+        <div class="col-sm-3 mb-4">
+            <h4 class="mb-3">
+                Welcome <span class="text-primary">{{ request.user.username|capfirst }}</span>
+            </h4>
+            <div class="list-group">
+                <a href="{% url 'profile' %}" class="list-group-item list-group-item-action">
+                    Profile
+                </a>
+                <a href="{% url 'address' %}" class="list-group-item list-group-item-action">
+                    Address
+                </a>
+                <a href="{% url 'orders' %}" class="list-group-item list-group-item-action">
+                    My Orders
+                </a>
+                <a href="{% url 'notifications' %}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                    Notifications
+                    {% if unread_notifications_count > 0 %}
+                    <span class="badge bg-danger rounded-pill">{{ unread_notifications_count }}</span>
+                    {% endif %}
+                </a>
+                <a href="{% url 'wishlist' %}" class="list-group-item list-group-item-action active d-flex justify-content-between align-items-center">
+                    My Wishlist
+                    {% if wishlist_item_count > 0 %}
+                    <span class="badge bg-danger rounded-pill">{{ wishlist_item_count }}</span>
+                    {% endif %}
+                </a>
+            </div>
+        </div>
+
+        <!-- RIGHT CONTENT -->
+        <div class="col-sm-9">
+            <div class="shadow-sm p-4 rounded bg-white">
+                <div class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom flex-wrap gap-2">
+                    <div>
+                        <h3 class="mb-0 fw-bold">My Wishlist</h3>
+                        <small class="text-muted">
+                            {{ wishlist_items|length }} item{{ wishlist_items|length|pluralize }} saved
+                        </small>
+                    </div>
+                </div>
+
+                {% if messages %}
+                    {% for msg in messages %}
+                        <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-3" role="alert">
+                            {{ msg }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+
+                {% if wishlist_items %}
+                    <div class="row g-3">
+                        {% for item in wishlist_items %}
+                        <div class="col-md-6 col-lg-4">
+                            <div class="card h-100 shadow-sm border-0 position-relative">
+                                <!-- Remove Button -->
+                                <form action="{% url 'remove-from-wishlist' %}" method="post" class="position-absolute top-0 end-0 m-2" style="z-index: 2;">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="item_id" value="{{ item.id }}">
+                                    <button type="submit" class="btn btn-sm btn-light rounded-circle shadow-sm text-danger" title="Remove from wishlist">
+                                        &times;
+                                    </button>
+                                </form>
+
+                                <a href="{% url 'product-detail' item.product.id %}" class="text-decoration-none text-dark">
+                                    <div class="text-center p-3 bg-light rounded-top" style="height: 180px;">
+                                        {% if item.product.product_image %}
+                                        <img src="{{ item.product.product_image.url }}" alt="{{ item.product.title }}" class="img-fluid h-100" style="object-fit: contain;">
+                                        {% else %}
+                                        <div class="d-flex align-items-center justify-content-center h-100 text-muted">
+                                            No Image
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="card-body pb-0">
+                                        <h5 class="card-title fs-6 fw-bold mb-1 text-truncate" title="{{ item.product.title }}">
+                                            {{ item.product.title }}
+                                        </h5>
+                                        <div class="mb-2">
+                                            <span class="text-danger fw-bold fs-5">৳ {{ item.product.discounted_price }}</span>
+                                            {% if item.product.selling_price > item.product.discounted_price %}
+                                            <small class="text-decoration-line-through text-muted ms-1">৳ {{ item.product.selling_price }}</small>
+                                            {% endif %}
+                                        </div>
+
+                                        <div class="mb-3">
+                                            {% if item.product.is_out_of_stock %}
+                                            <span class="badge bg-danger">Out of Stock</span>
+                                            {% elif item.product.is_low_stock %}
+                                            <span class="badge bg-warning text-dark">Low Stock ({{ item.product.stock }})</span>
+                                            {% else %}
+                                            <span class="badge bg-success">In Stock</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </a>
+
+                                <div class="card-footer bg-white border-0 pt-0 pb-3">
+                                    <div class="d-grid gap-2">
+                                        {% if not item.product.is_out_of_stock %}
+                                        <form action="{% url 'add-to-cart' %}" method="post" class="m-0">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="prod_id" value="{{ item.product.id }}">
+                                            <input type="hidden" name="quantity" value="1">
+                                            <button type="submit" class="btn btn-outline-success btn-sm w-100">
+                                                Add to Cart
+                                            </button>
+                                        </form>
+                                        {% endif %}
+                                        <a href="{% url 'product-detail' item.product.id %}" class="btn btn-sm btn-outline-primary w-100">
+                                            View Details
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="text-center py-5">
+                        <div class="mb-3">
+                            <span class="display-4 text-muted">&#9825;</span>
+                        </div>
+                        <h5 class="fw-bold text-muted">Your Wishlist is Empty</h5>
+                        <p class="text-secondary">Save items you like so you can easily find and purchase them later.</p>
+                        <a href="{% url 'home' %}" class="btn btn-primary btn-sm">
+                            Explore Products
+                        </a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock main-content %}
+

@@ -26,6 +26,12 @@
                     <span class="badge bg-danger rounded-pill">{{ unread_notifications_count }}</span>
                     {% endif %}
                 </a>
+                <a href="{% url 'wishlist' %}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                    My Wishlist
+                    {% if wishlist_item_count > 0 %}
+                    <span class="badge bg-danger rounded-pill">{{ wishlist_item_count }}</span>
+                    {% endif %}
+                </a>
             </div>
         </div>
 

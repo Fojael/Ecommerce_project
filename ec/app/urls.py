@@ -13,6 +13,8 @@ urlpatterns = [
     path('', views.home, name='home'),
     path('about/', views.about, name='about'),
     path('contact/', views.contact, name='contact'),
+    path('search/', views.ProductCatalogView.as_view(), name='search'),
+    path('products/', views.ProductCatalogView.as_view(), name='products'),
     path('category/<slug:val>', views.CategoryView.as_view(), name='category'),
     path('product-detail/<int:pk>', views.ProductDetail.as_view(), name='product-detail'),
     path('category-title/<val>', views.CategoryTitle.as_view(), name='category-title'),
@@ -25,6 +27,7 @@ urlpatterns = [
     path('plus-cart/', views.PlusCartView.as_view(), name='plus-cart'),
     path('minus-cart/', views.MinusCartView.as_view(), name='minus-cart'),
     path('remove-cart/', views.RemoveCartView.as_view(), name='remove-cart'),
+    path('update-cart/', views.UpdateCartView.as_view(), name='update-cart'),
     
     # Checkout & Order URLs
     path('checkout/', views.CheckoutView.as_view(), name='checkout'),
@@ -50,6 +53,16 @@ urlpatterns = [
     path('notifications/', views.NotificationListView.as_view(), name='notifications'),
     path('notifications/<int:pk>/read/', views.NotificationMarkReadView.as_view(), name='notification-mark-read'),
     path('notifications/mark-all-read/', views.NotificationMarkAllReadView.as_view(), name='notification-mark-all-read'),
+
+    # Wishlist URLs
+    path('wishlist/', views.WishlistListView.as_view(), name='wishlist'),
+    path('wishlist/add/', views.AddToWishlistView.as_view(), name='add-to-wishlist'),
+    path('wishlist/remove/', views.RemoveFromWishlistView.as_view(), name='remove-from-wishlist'),
+    path('wishlist/remove/<int:pk>/', views.RemoveFromWishlistView.as_view(), name='remove-from-wishlist-pk'),
+
+    # Product Review URLs
+    path('product/<int:pk>/review/', views.SubmitReviewView.as_view(), name='submit-review'),
+    path('review/<int:pk>/delete/', views.DeleteReviewView.as_view(), name='delete-review'),
     
     # login authentication
     path('customerregistration/', views.CustomerRegistrationView.as_view(), name='customerregistration'),

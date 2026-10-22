@@ -1,134 +1,193 @@
 {% extends "app/base.html" %}
 {% load static %}
-{% block title %}Checkout{% endblock title %}
+{% block title %}Order Checkout{% endblock title %}
 
 {% block main-content %}
 <div class="container my-5">
-    <h2 class="text-center mb-5 fw-bold">Order Checkout</h2>
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 pb-2 border-bottom">
+        <div>
+            <h2 class="fw-bold mb-1"><i class="bi bi-shield-check text-success me-2"></i>Order Checkout</h2>
+            <p class="text-muted small mb-0">Confirm your delivery details and choose your payment method.</p>
+        </div>
+        <div>
+            <a href="{% url 'show-cart' %}" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-left me-1"></i>Back to Cart
+            </a>
+        </div>
+    </div>
 
     {% if messages %}
         {% for msg in messages %}
-            <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-4" role="alert">
+            <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-4 shadow-sm" role="alert">
+                <i class="bi {% if msg.tags == 'error' or msg.tags == 'danger' %}bi-exclamation-octagon-fill text-danger{% elif msg.tags == 'warning' %}bi-exclamation-triangle-fill text-warning{% else %}bi-check-circle-fill text-success{% endif %} me-2"></i>
                 {{ msg }}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
         {% endfor %}
     {% endif %}
 
-    <div class="row">
-        <!-- LEFT COLUMN: Shipping Address & Items Review -->
-        <div class="col-lg-7">
-            <!-- Shipping Address Card -->
-            <div class="card shadow-sm border-0 mb-4">
-                <div class="card-header bg-primary text-white py-3 d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0 fw-bold">Shipping Address</h5>
-                    <a href="{% url 'profile' %}" class="btn btn-outline-light btn-sm">Edit Address</a>
-                </div>
-                <div class="card-body p-4">
-                    <h5 class="fw-bold text-dark mb-2">{{ customer.name }}</h5>
-                    <p class="mb-1"><strong>Mobile:</strong> {{ customer.mobile }}</p>
-                    <p class="mb-1"><strong>Locality:</strong> {{ customer.locality }}</p>
-                    <p class="mb-1"><strong>City:</strong> {{ customer.city }}</p>
-                    <p class="mb-1"><strong>Division / State:</strong> {{ customer.state }}</p>
-                    <p class="mb-0"><strong>Zip Code:</strong> {{ customer.zipcode }}</p>
-                </div>
-            </div>
-
-            <!-- Items Review Card -->
-            <div class="card shadow-sm border-0 mb-4">
-                <div class="card-header bg-secondary text-white py-3">
-                    <h5 class="mb-0 fw-bold">Order Items</h5>
-                </div>
-                <div class="card-body p-4">
-                    {% for item in cart_items %}
-                    <div class="row align-items-center mb-3 pb-3 {% if not forloop.last %}border-bottom{% endif %}">
-                        <div class="col-3 col-md-2 text-center">
-                            <img src="{% if item.product.product_image %}{{ item.product.product_image.url }}{% endif %}" alt="{{ item.product.title }}" class="img-fluid rounded" style="max-height: 70px; object-fit: contain;">
+    <form action="{% url 'place-order' %}" method="post" id="checkoutForm">
+        {% csrf_token %}
+        <div class="row g-4">
+            <!-- LEFT COLUMN: Delivery Details & Items Review -->
+            <div class="col-lg-7">
+                <!-- Shipping Address Card -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-geo-alt-fill text-danger me-2"></i>Delivery Address</h5>
+                        <button class="btn btn-outline-primary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#editShippingCollapse" aria-expanded="false" aria-controls="editShippingCollapse">
+                            <i class="bi bi-pencil-square me-1"></i>Customize Address
+                        </button>
+                    </div>
+                    <div class="card-body p-4">
+                        <!-- Current Summary View -->
+                        <div class="bg-light p-3 rounded mb-3 border">
+                            <h6 class="fw-bold text-dark mb-1">{{ customer.name }}</h6>
+                            <p class="mb-1 text-muted small"><i class="bi bi-telephone me-1"></i><strong>Phone:</strong> {{ customer.mobile }}</p>
+                            <p class="mb-1 text-muted small"><i class="bi bi-geo me-1"></i><strong>Address:</strong> {{ customer.locality }}, {{ customer.city }} - {{ customer.zipcode }}</p>
+                            <p class="mb-0 text-muted small"><i class="bi bi-compass me-1"></i><strong>Division / State:</strong> {{ customer.state }}</p>
                         </div>
-                        <div class="col-5 col-md-6">
-                            <h6 class="fw-bold mb-1">{{ item.product.title }}</h6>
-                            <p class="text-muted small mb-0">Qty: {{ item.quantity }} × ৳ {{ item.product.discounted_price }}</p>
-                        </div>
-                        <div class="col-4 col-md-4 text-end">
-                            <span class="fw-bold text-success">৳ {{ item.item_subtotal }}</span>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
 
-            <div class="d-flex justify-content-start">
-                <a href="{% url 'show-cart' %}" class="btn btn-outline-secondary">
-                    &larr; Back to Cart
-                </a>
-            </div>
-        </div>
-
-        <!-- RIGHT COLUMN: Order Summary & Place Order -->
-        <div class="col-lg-5 mt-4 mt-lg-0">
-            <div class="card shadow-sm border-0">
-                <div class="card-header bg-success text-white py-3">
-                    <h5 class="mb-0 fw-bold">Order Summary</h5>
-                </div>
-                <div class="card-body p-4">
-                    <div class="d-flex justify-content-between mb-2">
-                        <span>Items Subtotal</span>
-                        <span class="fw-bold">৳ {{ subtotal }}</span>
-                    </div>
-
-                    {% if total_discount > 0 %}
-                    <div class="d-flex justify-content-between mb-2 text-success">
-                        <span>Total Savings</span>
-                        <span class="fw-semibold">- ৳ {{ total_discount }}</span>
-                    </div>
-                    {% endif %}
-
-                    <div class="d-flex justify-content-between mb-3">
-                        <span>Delivery Charge</span>
-                        <span class="fw-bold">৳ {{ delivery_charge }}</span>
-                    </div>
-
-                    <hr>
-
-                    <div class="d-flex justify-content-between mb-4 fs-5">
-                        <span class="fw-bold">Grand Total</span>
-                        <span class="fw-bold text-success">৳ {{ grand_total }}</span>
-                    </div>
-
-                    <!-- Place Order Form -->
-                    <form action="{% url 'place-order' %}" method="post">
-                        {% csrf_token %}
-                        <div class="card mb-4 border">
-                            <div class="card-header bg-light py-2">
-                                <strong class="text-dark">Select Payment Method</strong>
-                            </div>
-                            <div class="card-body">
-                                <div class="form-check mb-3">
-                                    <input class="form-check-input" type="radio" name="payment_method" id="pay_cod" value="COD" checked>
-                                    <label class="form-check-label fw-semibold text-dark" for="pay_cod">
-                                        Cash on Delivery (COD)
-                                    </label>
-                                    <small class="d-block text-muted">Pay in cash when your order is delivered to your address.</small>
+                        <!-- Collapsible Address Override Form -->
+                        <div class="collapse" id="editShippingCollapse">
+                            <div class="card card-body border-primary-subtle bg-white">
+                                <h6 class="fw-bold text-primary mb-3">Deliver to a different name or address:</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-6 mb-2">
+                                        <label class="form-label small fw-semibold">Recipient Name *</label>
+                                        <input type="text" name="shipping_name" class="form-control form-control-sm" value="{{ customer.name }}" required>
+                                    </div>
+                                    <div class="col-md-6 mb-2">
+                                        <label class="form-label small fw-semibold">Mobile Number *</label>
+                                        <input type="text" name="shipping_mobile" class="form-control form-control-sm" value="{{ customer.mobile }}" required>
+                                    </div>
+                                    <div class="col-12 mb-2">
+                                        <label class="form-label small fw-semibold">Street Address / Locality *</label>
+                                        <input type="text" name="shipping_locality" class="form-control form-control-sm" value="{{ customer.locality }}" required>
+                                    </div>
+                                    <div class="col-md-5 mb-2">
+                                        <label class="form-label small fw-semibold">City *</label>
+                                        <input type="text" name="shipping_city" class="form-control form-control-sm" value="{{ customer.city }}" required>
+                                    </div>
+                                    <div class="col-md-4 mb-2">
+                                        <label class="form-label small fw-semibold">Division / State *</label>
+                                        <input type="text" name="shipping_state" class="form-control form-control-sm" value="{{ customer.state }}" required>
+                                    </div>
+                                    <div class="col-md-3 mb-2">
+                                        <label class="form-label small fw-semibold">Zip Code</label>
+                                        <input type="text" name="shipping_zipcode" class="form-control form-control-sm" value="{{ customer.zipcode }}">
+                                    </div>
                                 </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="payment_method" id="pay_ssl" value="SSLCOMMERZ">
-                                    <label class="form-check-label fw-semibold text-dark" for="pay_ssl">
-                                        Pay Online via SSLCommerz
-                                    </label>
-                                    <small class="d-block text-muted">Cards, Mobile Banking (bKash, Nagad, Rocket) and Internet Banking.</small>
-                                </div>
+                                <small class="text-muted mt-2">These details will be snapshotted onto this order without permanently overwriting your profile.</small>
                             </div>
                         </div>
+                    </div>
+                </div>
 
-                        <div class="d-grid">
-                            <button type="submit" class="btn btn-success btn-lg fw-bold py-3">
-                                Place Order
+                <!-- Items Review Card -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-box-seam text-primary me-2"></i>Order Items ({{ cart_items|length }})</h5>
+                        <a href="{% url 'show-cart' %}" class="small text-decoration-none fw-semibold">Edit Items</a>
+                    </div>
+                    <div class="card-body p-4">
+                        {% for item in cart_items %}
+                        <div class="row align-items-center py-2 {% if not forloop.last %}border-bottom{% endif %}">
+                            <div class="col-2 text-center">
+                                <img src="{% if item.product.product_image %}{{ item.product.product_image.url }}{% endif %}" alt="{{ item.product.title }}" class="img-fluid rounded border" style="max-height: 60px; object-fit: contain;">
+                            </div>
+                            <div class="col-6">
+                                <h6 class="fw-bold mb-1 text-dark">{{ item.product.title }}</h6>
+                                <p class="text-muted small mb-0">Qty: {{ item.quantity }} × ৳ {{ item.product.discounted_price|floatformat:2 }}</p>
+                            </div>
+                            <div class="col-4 text-end">
+                                <span class="fw-bold text-dark">৳ {{ item.item_subtotal|floatformat:2 }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT COLUMN: Payment Method & Financial Summary -->
+            <div class="col-lg-5">
+                <div class="card shadow-sm border-0 sticky-top" style="top: 20px;">
+                    <div class="card-header bg-white py-3 border-bottom">
+                        <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-credit-card text-success me-2"></i>Payment &amp; Summary</h5>
+                    </div>
+                    <div class="card-body p-4">
+                        <!-- Financial Breakdown -->
+                        <div class="d-flex justify-content-between mb-2">
+                            <span class="text-muted">Items Subtotal</span>
+                            <span class="fw-bold text-dark">৳ {{ subtotal|floatformat:2 }}</span>
+                        </div>
+
+                        {% if total_discount > 0 %}
+                        <div class="d-flex justify-content-between mb-2 text-success">
+                            <span>Total Savings</span>
+                            <span class="fw-semibold">- ৳ {{ total_discount|floatformat:2 }}</span>
+                        </div>
+                        {% endif %}
+
+                        <div class="d-flex justify-content-between mb-3 text-muted">
+                            <span>Delivery Charge</span>
+                            <span class="fw-semibold text-dark">৳ {{ delivery_charge|floatformat:2 }}</span>
+                        </div>
+
+                        <hr class="my-3">
+
+                        <div class="d-flex justify-content-between mb-4 fs-5">
+                            <span class="fw-bold">Payable Total</span>
+                            <span class="fw-bold text-success fs-4">৳ {{ grand_total|floatformat:2 }}</span>
+                        </div>
+
+                        <!-- Payment Method Selection -->
+                        <div class="mb-4">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-2">Select Payment Method</label>
+                            
+                            <!-- COD Option -->
+                            <div class="form-check p-3 border rounded mb-3 bg-light cursor-pointer">
+                                <input class="form-check-input mt-1" type="radio" name="payment_method" id="pay_cod" value="COD" checked>
+                                <label class="form-check-label fw-bold text-dark d-block" for="pay_cod">
+                                    <i class="bi bi-cash-stack text-success me-1"></i> Cash on Delivery (COD)
+                                </label>
+                                <small class="text-muted d-block mt-1">Pay ৳ {{ grand_total|floatformat:2 }} in cash upon receiving the parcel from the delivery courier.</small>
+                            </div>
+
+                            <!-- SSLCommerz Option -->
+                            <div class="form-check p-3 border rounded bg-light cursor-pointer">
+                                <input class="form-check-input mt-1" type="radio" name="payment_method" id="pay_ssl" value="SSLCOMMERZ">
+                                <label class="form-check-label fw-bold text-dark d-block" for="pay_ssl">
+                                    <i class="bi bi-credit-card-2-front text-primary me-1"></i> Pay Online via SSLCommerz
+                                </label>
+                                <small class="text-muted d-block mt-1">Pay ৳ {{ grand_total|floatformat:2 }} securely using Visa, Mastercard, bKash, Nagad, Rocket, or Internet Banking.</small>
+                            </div>
+                        </div>
+
+                        <!-- Place Order Button -->
+                        <div class="d-grid mb-3">
+                            <button type="submit" id="placeOrderBtn" class="btn btn-success btn-lg fw-bold py-3 shadow-sm">
+                                <i class="bi bi-lock-fill me-1"></i>Place Order (৳ {{ grand_total|floatformat:2 }})
                             </button>
                         </div>
-                    </form>
+
+                        <div class="text-center text-muted small">
+                            <i class="bi bi-shield-lock me-1"></i> By clicking Place Order, you confirm your order and agree to our delivery terms.
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
+    </form>
 </div>
+
+<script>
+document.getElementById('checkoutForm').addEventListener('submit', function() {
+    var btn = document.getElementById('placeOrderBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Processing Order...';
+    }
+});
+</script>
 {% endblock main-content %}

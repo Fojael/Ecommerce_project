@@ -1,4 +1,4 @@
-from .models import Cart, Notification
+from .models import Cart, Notification, WishlistItem
 
 
 def cart_item_count(request):
@@ -22,3 +22,14 @@ def unread_notifications_count(request):
         except Exception:
             return {'unread_notifications_count': 0}
     return {'unread_notifications_count': 0}
+
+
+def wishlist_item_count(request):
+    """Context processor returning the number of items in the authenticated user's wishlist."""
+    if request.user.is_authenticated:
+        try:
+            count = WishlistItem.objects.filter(user=request.user).count()
+            return {'wishlist_item_count': count}
+        except Exception:
+            return {'wishlist_item_count': 0}
+    return {'wishlist_item_count': 0}

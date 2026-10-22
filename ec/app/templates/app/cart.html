@@ -4,76 +4,116 @@
 
 {% block main-content %}
 <div class="container my-5">
-    <h2 class="text-center mb-5 fw-bold">Shopping Cart</h2>
+    <!-- Header -->
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 pb-2 border-bottom">
+        <div>
+            <h2 class="fw-bold mb-1"><i class="bi bi-cart3 text-primary me-2"></i>Shopping Cart</h2>
+            <p class="text-muted small mb-0">Review items in your cart and proceed to checkout.</p>
+        </div>
+        <div>
+            <a href="{% url 'products' %}" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-left me-1"></i>Continue Shopping
+            </a>
+        </div>
+    </div>
+
+    <!-- Alert Messages -->
+    {% if messages %}
+        {% for msg in messages %}
+            <div class="alert alert-{{ msg.tags }} alert-dismissible fade show mb-4 shadow-sm" role="alert">
+                <i class="bi {% if msg.tags == 'error' or msg.tags == 'danger' %}bi-exclamation-octagon-fill text-danger{% elif msg.tags == 'warning' %}bi-exclamation-triangle-fill text-warning{% else %}bi-check-circle-fill text-success{% endif %} me-2"></i>
+                {{ msg }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
 
     {% if cart_items %}
-    <div class="row">
+    <div class="row g-4">
         <!-- Cart Items Column -->
         <div class="col-lg-8">
             <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                    <span class="fw-bold text-dark fs-6">Cart Items ({{ cart_items|length }})</span>
+                    <span class="small text-muted">All prices in BDT (৳)</span>
+                </div>
                 <div class="card-body p-4">
                     {% for item in cart_items %}
-                    <div class="row align-items-center mb-4 pb-3 {% if not forloop.last %}border-bottom{% endif %}">
+                    <div class="row align-items-center py-3 {% if not forloop.last %}border-bottom{% endif %}">
                         <!-- Product Image -->
-                        <div class="col-md-2 col-4 text-center">
-                            <img src="{% if item.product.product_image %}{{ item.product.product_image.url }}{% endif %}" alt="{{ item.product.title }}" class="img-fluid rounded" style="max-height: 90px; object-fit: contain;">
+                        <div class="col-md-2 col-4 text-center mb-2 mb-md-0">
+                            <a href="{% url 'product-detail' item.product.id %}">
+                                <img src="{% if item.product.product_image %}{{ item.product.product_image.url }}{% endif %}" alt="{{ item.product.title }}" class="img-fluid rounded border p-1" style="max-height: 85px; width: 85px; object-fit: contain;">
+                            </a>
                         </div>
 
                         <!-- Product Info -->
-                        <div class="col-md-4 col-8">
-                            <h5 class="fw-bold mb-1">{{ item.product.title }}</h5>
-                            <p class="text-muted small mb-1">
-                                Price: <span class="fw-semibold text-dark">৳ {{ item.product.discounted_price }}</span>
+                        <div class="col-md-4 col-8 mb-2 mb-md-0">
+                            <h6 class="fw-bold mb-1">
+                                <a href="{% url 'product-detail' item.product.id %}" class="text-decoration-none text-dark hover-primary">
+                                    {{ item.product.title }}
+                                </a>
+                            </h6>
+                            <div class="small text-muted mb-1">
+                                Price: <span class="fw-bold text-dark">৳ {{ item.product.discounted_price|floatformat:2 }}</span>
                                 {% if item.product.selling_price > item.product.discounted_price %}
-                                <del class="text-secondary ms-1">৳ {{ item.product.selling_price }}</del>
+                                <del class="text-secondary ms-1">৳ {{ item.product.selling_price|floatformat:2 }}</del>
                                 {% endif %}
-                            </p>
-                            <p class="text-success small mb-0 fw-semibold">
-                                Subtotal: ৳ {{ item.item_subtotal }}
-                            </p>
+                            </div>
+                            <div class="small text-success fw-semibold">
+                                Subtotal: ৳ {{ item.item_subtotal|floatformat:2 }}
+                            </div>
+
+                            <!-- Stock Status Badges -->
                             {% if item.product.is_out_of_stock %}
-                            <div class="mt-1"><span class="badge bg-danger small">Out of stock (0 available)</span></div>
+                            <div class="mt-1"><span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Out of stock (0 available)</span></div>
                             {% elif item.quantity > item.product.stock %}
-                            <div class="mt-1"><span class="badge bg-danger small">Requested {{ item.quantity }}, only {{ item.product.stock }} in stock</span></div>
+                            <div class="mt-1"><span class="badge bg-danger"><i class="bi bi-exclamation-triangle me-1"></i>Requested {{ item.quantity }}, only {{ item.product.stock }} available</span></div>
                             {% elif item.product.is_low_stock %}
-                            <div class="mt-1"><span class="badge bg-warning text-dark small">Low stock: {{ item.product.stock }} left</span></div>
+                            <div class="mt-1"><span class="badge bg-warning text-dark"><i class="bi bi-info-circle me-1"></i>Low stock: {{ item.product.stock }} left</span></div>
+                            {% else %}
+                            <div class="mt-1"><span class="badge bg-success-subtle text-success border border-success-subtle">In Stock</span></div>
                             {% endif %}
                         </div>
 
                         <!-- Quantity Controls -->
                         <div class="col-md-4 col-7 mt-3 mt-md-0 d-flex align-items-center justify-content-center">
                             <!-- Minus Button Form -->
-                            <form action="{% url 'minus-cart' %}" method="post" class="d-inline me-2">
+                            <form action="{% url 'minus-cart' %}" method="post" class="d-inline">
                                 {% csrf_token %}
                                 <input type="hidden" name="item_id" value="{{ item.id }}">
                                 <input type="hidden" name="prod_id" value="{{ item.product.id }}">
-                                <button type="submit" class="btn btn-outline-secondary btn-sm px-3" title="Decrease Quantity">
-                                    -
+                                <button type="submit" class="btn btn-outline-secondary btn-sm px-2 py-1" aria-label="Decrease quantity" title="Decrease Quantity">
+                                    <i class="bi bi-dash"></i> -
                                 </button>
                             </form>
 
-                            <!-- Current Quantity -->
-                            <span class="fw-bold px-3 py-1 border rounded bg-light">{{ item.quantity }}</span>
+                            <!-- Direct Quantity Form -->
+                            <form action="{% url 'update-cart' %}" method="post" class="d-inline mx-2" id="updateForm_{{ item.id }}">
+                                {% csrf_token %}
+                                <input type="hidden" name="item_id" value="{{ item.id }}">
+                                <input type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.product.stock }}" class="form-control form-control-sm text-center fw-bold bg-white" style="width: 65px;" aria-label="Item quantity" onchange="this.form.submit()" title="Type quantity and press Enter or blur">
+                            </form>
 
                             <!-- Plus Button Form -->
-                            <form action="{% url 'plus-cart' %}" method="post" class="d-inline ms-2">
+                            <form action="{% url 'plus-cart' %}" method="post" class="d-inline">
                                 {% csrf_token %}
                                 <input type="hidden" name="item_id" value="{{ item.id }}">
                                 <input type="hidden" name="prod_id" value="{{ item.product.id }}">
-                                <button type="submit" class="btn btn-outline-secondary btn-sm px-3" title="Increase Quantity">
-                                    +
+                                <button type="submit" class="btn btn-outline-secondary btn-sm px-2 py-1" aria-label="Increase quantity" title="Increase Quantity" {% if item.quantity >= item.product.stock %}disabled{% endif %}>
+                                    <i class="bi bi-plus"></i> +
                                 </button>
                             </form>
                         </div>
 
                         <!-- Remove Button Form -->
                         <div class="col-md-2 col-5 mt-3 mt-md-0 text-end">
-                            <form action="{% url 'remove-cart' %}" method="post" class="d-inline">
+                            <form action="{% url 'remove-cart' %}" method="post" class="d-inline" onsubmit="return confirm('Remove {{ item.product.title }} from your cart?');">
                                 {% csrf_token %}
                                 <input type="hidden" name="item_id" value="{{ item.id }}">
                                 <input type="hidden" name="prod_id" value="{{ item.product.id }}">
-                                <button type="submit" class="btn btn-outline-danger btn-sm" title="Remove Item">
-                                    Remove
+                                <button type="submit" class="btn btn-outline-danger btn-sm" title="Remove {{ item.product.title }}" aria-label="Remove Item">
+                                    <i class="bi bi-trash"></i> Remove
                                 </button>
                             </form>
                         </div>
@@ -82,58 +122,62 @@
                 </div>
             </div>
 
-            <div class="d-flex justify-content-start">
-                <a href="{% url 'home' %}" class="btn btn-outline-success">
-                    &larr; Continue Shopping
+            <div class="d-flex justify-content-between align-items-center">
+                <a href="{% url 'products' %}" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-left me-1"></i>Continue Shopping
                 </a>
             </div>
         </div>
 
         <!-- Order Summary Column -->
-        <div class="col-lg-4 mt-4 mt-lg-0">
-            <div class="card shadow-sm border-0">
-                <div class="card-header bg-success text-white py-3">
-                    <h5 class="mb-0 fw-bold">Order Summary</h5>
+        <div class="col-lg-4">
+            <div class="card shadow-sm border-0 sticky-top" style="top: 20px;">
+                <div class="card-header bg-white py-3 border-bottom">
+                    <h5 class="mb-0 fw-bold text-dark"><i class="bi bi-receipt me-2 text-primary"></i>Order Summary</h5>
                 </div>
                 <div class="card-body p-4">
                     <div class="d-flex justify-content-between mb-2">
-                        <span>Cart Subtotal</span>
-                        <span class="fw-bold">৳ {{ cart_subtotal }}</span>
+                        <span class="text-muted">Cart Subtotal</span>
+                        <span class="fw-bold text-dark">৳ {{ cart_subtotal|floatformat:2 }}</span>
                     </div>
 
                     {% if total_discount > 0 %}
                     <div class="d-flex justify-content-between mb-2 text-success">
                         <span>Total Savings</span>
-                        <span class="fw-semibold">- ৳ {{ total_discount }}</span>
+                        <span class="fw-semibold">- ৳ {{ total_discount|floatformat:2 }}</span>
                     </div>
                     {% endif %}
 
                     <div class="d-flex justify-content-between mb-3 text-muted small">
-                        <span>Delivery Charge</span>
-                        <span>Calculated at checkout</span>
+                        <span>Estimated Delivery</span>
+                        <span class="fw-semibold text-dark">৳ {{ delivery_charge|floatformat:2 }}</span>
                     </div>
 
-                    <hr>
+                    <hr class="my-3">
 
                     <div class="d-flex justify-content-between mb-4 fs-5">
-                        <span class="fw-bold">Total (Subtotal)</span>
-                        <span class="fw-bold text-success">৳ {{ cart_subtotal }}</span>
+                        <span class="fw-bold">Estimated Total</span>
+                        <span class="fw-bold text-success">৳ {{ estimated_total|floatformat:2 }}</span>
                     </div>
 
                     <!-- Checkout button -->
-                    <div class="d-grid mb-2">
+                    <div class="d-grid mb-3">
                         {% if has_stock_error %}
-                        <div class="alert alert-danger small p-2 mb-2 text-center">
-                            Please adjust quantities for items exceeding stock before proceeding.
+                        <div class="alert alert-danger small p-2 mb-3 text-center">
+                            <i class="bi bi-exclamation-triangle-fill me-1"></i> Please adjust quantities for items exceeding stock before proceeding.
                         </div>
-                        <button class="btn btn-secondary btn-lg" disabled title="Adjust quantities to proceed">
+                        <button class="btn btn-secondary btn-lg fw-bold py-3" disabled title="Adjust quantities to proceed">
                             Proceed to Checkout
                         </button>
                         {% else %}
-                        <a href="{% url 'checkout' %}" class="btn btn-success btn-lg">
-                            Proceed to Checkout
+                        <a href="{% url 'checkout' %}" class="btn btn-success btn-lg fw-bold py-3 shadow-sm">
+                            <i class="bi bi-shield-check me-2"></i>Proceed to Checkout
                         </a>
                         {% endif %}
+                    </div>
+
+                    <div class="text-center text-muted small">
+                        <i class="bi bi-lock-fill text-muted me-1"></i> Secure checkout powered by SSLCommerz and Cash on Delivery
                     </div>
                 </div>
             </div>
@@ -145,12 +189,13 @@
         <div class="col-md-6 text-center py-5">
             <div class="card shadow-sm border-0 p-5">
                 <div class="mb-4">
-                    <h3 class="fw-bold">Your Cart is Empty</h3>
+                    <i class="bi bi-cart-x text-muted" style="font-size: 4rem;"></i>
+                    <h3 class="fw-bold mt-3">Your Cart is Empty</h3>
                     <p class="text-muted">You don't have any items in your shopping cart yet.</p>
                 </div>
                 <div>
-                    <a href="{% url 'home' %}" class="btn btn-success btn-lg px-4">
-                        Start Shopping
+                    <a href="{% url 'products' %}" class="btn btn-primary px-4 py-2">
+                        <i class="bi bi-grid-fill me-2"></i>Explore Products
                     </a>
                 </div>
             </div>

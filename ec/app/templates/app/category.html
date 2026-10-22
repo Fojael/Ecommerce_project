@@ -1,29 +1,238 @@
 {% extends "app/base.html" %}
 {% load static %}
-{% block title %}Category{% endblock title %}
+{% block title %}{{ category_title_display|default:"Product Catalog" }}{% endblock title %}
+
 {% block main-content %}
-<div class="container my-5">
+<div class="container my-4">
+    <!-- Breadcrumb / Header -->
+    <div class="row mb-3">
+        <div class="col-12">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb mb-2">
+                    <li class="breadcrumb-item"><a href="{% url 'home' %}">Home</a></li>
+                    <li class="breadcrumb-item"><a href="{% url 'products' %}">Products</a></li>
+                    {% if selected_category %}
+                    <li class="breadcrumb-item active" aria-current="page">{{ category_title_display }}</li>
+                    {% elif search_query %}
+                    <li class="breadcrumb-item active" aria-current="page">Search: "{{ search_query }}"</li>
+                    {% else %}
+                    <li class="breadcrumb-item active" aria-current="page">All Products</li>
+                    {% endif %}
+                </ol>
+            </nav>
+        </div>
+    </div>
+
     <div class="row">
-        <div class="col-sm-3 mb-4">
-            <div class="list-group">
-                {% for val in title %}
-                <a href="{% url 'category-title' val.title %}" class="list-group-item list-group-item-action" aria-current="true">
-                    {{ val.title }}
-                </a>
-                {% endfor %}
+        <!-- Filter & Search Sidebar -->
+        <div class="col-lg-3 col-md-4 mb-4">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0 fw-bold"><i class="bi bi-funnel text-primary me-2"></i>Filters</h5>
+                    {% if active_filters %}
+                    <a href="{% url 'search' %}" class="small text-danger text-decoration-none fw-semibold">Clear All</a>
+                    {% endif %}
+                </div>
+                <div class="card-body p-3">
+                    <form method="get" action="{% url 'search' %}" id="catalogFilterForm">
+                        <input type="hidden" name="sort" value="{{ selected_sort }}">
+
+                        <!-- Keyword Search -->
+                        <div class="mb-3">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-1">Search Keywords</label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" name="q" class="form-control" placeholder="Title, flavor, dairy..." value="{{ search_query }}">
+                                {% if search_query %}
+                                <a href="?{% if preserved_query_params %}{{ preserved_query_params }}{% endif %}" class="btn btn-outline-secondary" title="Clear search">✕</a>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <hr class="my-3 text-muted">
+
+                        <!-- Category Filter -->
+                        <div class="mb-3">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-2">Category</label>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="category" id="cat_all" value="" {% if not selected_category %}checked{% endif %}>
+                                <label class="form-check-label small" for="cat_all">All Categories</label>
+                            </div>
+                            {% for code, name in categories %}
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="category" id="cat_{{ code }}" value="{{ code }}" {% if selected_category == code %}checked{% endif %}>
+                                <label class="form-check-label small" for="cat_{{ code }}">{{ name }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
+
+                        <hr class="my-3 text-muted">
+
+                        <!-- Price Range Filter -->
+                        <div class="mb-3">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-2">Price Range (৳)</label>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <input type="number" step="any" min="0" name="min_price" class="form-control form-control-sm" placeholder="Min ৳" value="{% if min_price is not None %}{{ min_price }}{% endif %}">
+                                </div>
+                                <div class="col-6">
+                                    <input type="number" step="any" min="0" name="max_price" class="form-control form-control-sm" placeholder="Max ৳" value="{% if max_price is not None %}{{ max_price }}{% endif %}">
+                                </div>
+                            </div>
+                        </div>
+
+                        <hr class="my-3 text-muted">
+
+                        <!-- Availability Filter -->
+                        <div class="mb-3">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-2">Availability</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="in_stock" value="1" id="inStockCheck" {% if in_stock %}checked{% endif %}>
+                                <label class="form-check-label small" for="inStockCheck">In-Stock Only</label>
+                            </div>
+                        </div>
+
+                        <hr class="my-3 text-muted">
+
+                        <!-- Customer Rating Filter -->
+                        <div class="mb-3">
+                            <label class="form-label fw-bold small text-muted text-uppercase mb-2">Minimum Rating</label>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="rating" id="rating_all" value="" {% if not selected_rating %}checked{% endif %}>
+                                <label class="form-check-label small" for="rating_all">Any Rating</label>
+                            </div>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="rating" id="rating_4" value="4" {% if selected_rating == 4.0 or selected_rating == 4 %}checked{% endif %}>
+                                <label class="form-check-label small" for="rating_4"><span class="text-warning">★★★★☆</span> 4★ &amp; above</label>
+                            </div>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="rating" id="rating_3" value="3" {% if selected_rating == 3.0 or selected_rating == 3 %}checked{% endif %}>
+                                <label class="form-check-label small" for="rating_3"><span class="text-warning">★★★☆☆</span> 3★ &amp; above</label>
+                            </div>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="rating" id="rating_2" value="2" {% if selected_rating == 2.0 or selected_rating == 2 %}checked{% endif %}>
+                                <label class="form-check-label small" for="rating_2"><span class="text-warning">★★☆☆☆</span> 2★ &amp; above</label>
+                            </div>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="radio" name="rating" id="rating_1" value="1" {% if selected_rating == 1.0 or selected_rating == 1 %}checked{% endif %}>
+                                <label class="form-check-label small" for="rating_1"><span class="text-warning">★☆☆☆☆</span> 1★ &amp; above</label>
+                            </div>
+                        </div>
+
+                        <div class="d-grid gap-2 mt-4">
+                            <button type="submit" class="btn btn-primary btn-sm fw-bold"><i class="bi bi-funnel me-1"></i>Apply Filters</button>
+                            <a href="{% url 'search' %}" class="btn btn-outline-secondary btn-sm">Reset Filters</a>
+                        </div>
+                    </form>
+                </div>
             </div>
+
+            <!-- Quick Title Navigation (Backwards Compatibility) -->
+            {% if title %}
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white py-2 border-bottom">
+                    <span class="fw-bold small text-muted text-uppercase">Direct Products</span>
+                </div>
+                <div class="list-group list-group-flush small" style="max-height: 250px; overflow-y: auto;">
+                    {% for val in title %}
+                    <a href="{% url 'category-title' val.title %}" class="list-group-item list-group-item-action py-2 text-truncate" title="{{ val.title }}">
+                        {{ val.title }}
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
         </div>
 
-        <div class="col-sm-9">
-            <div class="row">
+        <!-- Products Grid & Controls -->
+        <div class="col-lg-9 col-md-8">
+            <!-- Validation Errors Notice -->
+            {% if filter_errors %}
+            <div class="alert alert-warning alert-dismissible fade show py-2 small" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                {% for err in filter_errors %}
+                <span>{{ err }}</span>{% if not forloop.last %} | {% endif %}
+                {% endfor %}
+                <button type="button" class="btn-close py-2" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <!-- Top Controls: Result Count & Sorting -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-body py-2 px-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <span class="fw-bold text-dark fs-5">{{ category_title_display }}</span>
+                        <span class="text-muted small ms-2">
+                            {% if total_count > 0 %}
+                                {% if page_obj and page_obj.paginator %}
+                                Showing {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ total_count }} products
+                                {% else %}
+                                Showing {{ total_count }} product{{ total_count|pluralize }}
+                                {% endif %}
+                            {% else %}
+                                0 products found
+                            {% endif %}
+                        </span>
+                    </div>
+
+                    <div class="d-flex align-items-center">
+                        <label for="sortSelect" class="small text-muted me-2 text-nowrap">Sort by:</label>
+                        <select id="sortSelect" class="form-select form-select-sm" style="min-width: 170px;" onchange="updateSort(this.value)">
+                            {% for key, opt in sort_options.items %}
+                            <option value="{{ key }}" {% if selected_sort == key %}selected{% endif %}>{{ opt.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Active Filters Bar -->
+                {% if active_filters %}
+                <div class="card-footer bg-light py-2 px-3 border-top d-flex flex-wrap align-items-center gap-2">
+                    <span class="small text-muted me-1">Active filters:</span>
+                    {% for af in active_filters %}
+                    <span class="badge bg-white text-dark border shadow-sm py-1 px-2 d-inline-flex align-items-center">
+                        {{ af.label }}
+                    </span>
+                    {% endfor %}
+                    <a href="{% url 'search' %}" class="small text-danger ms-2 text-decoration-none fw-semibold">Clear All</a>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Product Cards Row -->
+            <div class="row g-3">
                 {% for prod in product %}
-                <div class="col-md-4 col-sm-6 text-center mb-4">
-                    <a href="{% url 'product-detail' prod.id %}" class="btn text-decoration-none text-dark w-100">
-                        <div class="card h-100 p-2 shadow-sm border-0">
-                            <img src="{% if prod.product_image %}{{ prod.product_image.url }}{% endif %}" class="card-img-top mx-auto" style="height: 180px; width: 100%; object-fit: contain;" alt="{{ prod.title }}" />
+                <div class="col-xl-4 col-md-6 col-sm-6 text-center">
+                    <div class="card h-100 p-2 shadow-sm border-0 position-relative">
+                        <!-- Stock Status Badge -->
+                        <div class="position-absolute top-0 start-0 m-2">
+                            {% if prod.stock <= 0 %}
+                            <span class="badge bg-danger">Out of Stock</span>
+                            {% elif prod.stock <= 5 %}
+                            <span class="badge bg-warning text-dark">Low Stock ({{ prod.stock }})</span>
+                            {% else %}
+                            <span class="badge bg-success">In Stock</span>
+                            {% endif %}
+                        </div>
+
+                        <a href="{% url 'product-detail' prod.id %}" class="text-decoration-none text-dark d-block">
+                            <img src="{% if prod.product_image %}{{ prod.product_image.url }}{% endif %}" class="card-img-top mx-auto mt-2" style="height: 180px; width: 100%; object-fit: contain;" alt="{{ prod.title }}" />
                             <div class="card-body p-2">
-                                <div class="fw-bold">{{ prod.title }}</div>
-                                <div class="fw-bold text-danger">
+                                <div class="fw-bold text-truncate" title="{{ prod.title }}">{{ prod.title }}</div>
+                                
+                                <!-- Rating snippet -->
+                                <div class="small my-1">
+                                    {% if prod.avg_rating and prod.avg_rating > 0 %}
+                                    <span class="text-warning">★</span> <span class="fw-bold">{{ prod.avg_rating|floatformat:1 }}</span>
+                                    <span class="text-muted">({{ prod.approved_review_count }})</span>
+                                    {% elif prod.average_rating and prod.average_rating > 0 %}
+                                    <span class="text-warning">★</span> <span class="fw-bold">{{ prod.average_rating|floatformat:1 }}</span>
+                                    <span class="text-muted">({{ prod.review_count }})</span>
+                                    {% else %}
+                                    <span class="text-muted">No reviews</span>
+                                    {% endif %}
+                                </div>
+
+                                <div class="fw-bold text-danger fs-6">
                                     ৳ {{ prod.discounted_price }}
                                     {% if prod.selling_price > prod.discounted_price %}
                                     <small class="fw-light text-decoration-line-through text-muted ms-1">
@@ -32,16 +241,93 @@
                                     {% endif %}
                                 </div>
                             </div>
+                        </a>
+                        <div class="card-footer bg-transparent border-0 pt-0 pb-2">
+                            <a href="{% url 'product-detail' prod.id %}" class="btn btn-outline-primary btn-sm w-100">View Details</a>
                         </div>
-                    </a>
+                    </div>
                 </div>
                 {% empty %}
                 <div class="col-12 text-center py-5">
-                    <p class="text-muted">No products available in this category.</p>
+                    <div class="card border-0 shadow-sm p-5">
+                        <i class="bi bi-search text-muted mb-3" style="font-size: 3rem;"></i>
+                        <h5 class="fw-bold text-dark">No Products Found</h5>
+                        <p class="text-muted small mb-3">No products available matching your search and filter criteria.</p>
+                        <div>
+                            <a href="{% url 'search' %}" class="btn btn-primary btn-sm"><i class="bi bi-arrow-counterclockwise me-1"></i>Reset All Filters</a>
+                        </div>
+                    </div>
                 </div>
                 {% endfor %}
             </div>
+
+            <!-- Pagination Navigation -->
+            {% if page_obj and paginator and paginator.num_pages > 1 %}
+            <nav aria-label="Product catalog pagination" class="mt-4">
+                <ul class="pagination justify-content-center">
+                    <!-- First Page -->
+                    {% if page_obj.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if preserved_query_params %}{{ preserved_query_params }}&{% endif %}page=1" aria-label="First">
+                            <span aria-hidden="true">&laquo;&laquo;</span>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if preserved_query_params %}{{ preserved_query_params }}&{% endif %}page={{ page_obj.previous_page_number }}" aria-label="Previous">
+                            <span aria-hidden="true">&laquo;</span>
+                        </a>
+                    </li>
+                    {% else %}
+                    <li class="page-item disabled"><span class="page-link">&laquo;&laquo;</span></li>
+                    <li class="page-item disabled"><span class="page-link">&laquo;</span></li>
+                    {% endif %}
+
+                    <!-- Page Numbers -->
+                    {% for page_num in paginator.page_range %}
+                        {% if page_num == page_obj.number %}
+                        <li class="page-item active" aria-current="page">
+                            <span class="page-link">{{ page_num }}</span>
+                        </li>
+                        {% elif page_num > page_obj.number|add:"-3" and page_num < page_obj.number|add:"3" %}
+                        <li class="page-item">
+                            <a class="page-link" href="?{% if preserved_query_params %}{{ preserved_query_params }}&{% endif %}page={{ page_num }}">{{ page_num }}</a>
+                        </li>
+                        {% endif %}
+                    {% endfor %}
+
+                    <!-- Next & Last Page -->
+                    {% if page_obj.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if preserved_query_params %}{{ preserved_query_params }}&{% endif %}page={{ page_obj.next_page_number }}" aria-label="Next">
+                            <span aria-hidden="true">&raquo;</span>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if preserved_query_params %}{{ preserved_query_params }}&{% endif %}page={{ paginator.num_pages }}" aria-label="Last">
+                            <span aria-hidden="true">&raquo;&raquo;</span>
+                        </a>
+                    </li>
+                    {% else %}
+                    <li class="page-item disabled"><span class="page-link">&raquo;</span></li>
+                    <li class="page-item disabled"><span class="page-link">&raquo;&raquo;</span></li>
+                    {% endif %}
+                </ul>
+            </nav>
+            {% endif %}
         </div>
     </div>
 </div>
+
+<script>
+function updateSort(val) {
+    var form = document.getElementById('catalogFilterForm');
+    if (form) {
+        var sortInput = form.querySelector('input[name="sort"]');
+        if (sortInput) {
+            sortInput.value = val;
+        }
+        form.submit();
+    }
+}
+</script>
 {% endblock main-content %}

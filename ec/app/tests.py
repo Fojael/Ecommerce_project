@@ -9,7 +9,7 @@ from django.db import IntegrityError
 from django.core import mail
 from app.models import (
     Customer, Product, Cart, CartItem, Order, OrderItem, Payment, StockAdjustment,
-    OrderStatusHistory, Notification
+    OrderStatusHistory, Notification, WishlistItem, ProductReview
 )
 from app.services.inventory import (
     adjust_stock,
@@ -3211,3 +3211,1175 @@ class NotificationAndEmailTests(TestCase):
 
 
 
+
+
+class WishlistTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.password = 'WishlistPass123!@#'
+        self.user = User.objects.create_user(
+            username='wishlist_user',
+            email='wishlist@example.com',
+            password=self.password
+        )
+        self.other_user = User.objects.create_user(
+            username='other_wishlist_user',
+            email='other_wishlist@example.com',
+            password=self.password
+        )
+        self.product1 = Product.objects.create(
+            title='Sweet Curd',
+            selling_price=120.00,
+            discounted_price=100.00,
+            description='Delicious sweet curd',
+            category='CR',
+            stock=15
+        )
+        self.product2 = Product.objects.create(
+            title='Premium Butter Ghee',
+            selling_price=500.00,
+            discounted_price=450.00,
+            description='Pure desi ghee',
+            category='GH',
+            stock=0  # Out of stock
+        )
+
+    def test_authenticated_add_to_wishlist(self):
+        """1. Authenticated customer can add a product to wishlist via POST."""
+        self.client.login(username=self.user.username, password=self.password)
+        resp = self.client.post(reverse('add-to-wishlist'), {'prod_id': self.product1.id})
+        self.assertRedirects(resp, reverse('wishlist'))
+        self.assertTrue(WishlistItem.objects.filter(user=self.user, product=self.product1).exists())
+
+    def test_unauthenticated_add_to_wishlist_redirects(self):
+        """2. Unauthenticated user cannot add to wishlist and is redirected to login."""
+        resp = self.client.post(reverse('add-to-wishlist'), {'prod_id': self.product1.id})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse('login'), resp.url)
+        self.assertEqual(WishlistItem.objects.count(), 0)
+
+    def test_duplicate_add_to_wishlist_is_idempotent(self):
+        """3. Adding the same product twice does not duplicate rows; uniqueness is enforced."""
+        self.client.login(username=self.user.username, password=self.password)
+        self.client.post(reverse('add-to-wishlist'), {'prod_id': self.product1.id})
+        self.client.post(reverse('add-to-wishlist'), {'prod_id': self.product1.id})
+        self.assertEqual(WishlistItem.objects.filter(user=self.user, product=self.product1).count(), 1)
+
+    def test_authenticated_remove_from_wishlist(self):
+        """4. Authenticated customer can remove an item from wishlist via POST."""
+        item = WishlistItem.objects.create(user=self.user, product=self.product1)
+        self.client.login(username=self.user.username, password=self.password)
+        resp = self.client.post(reverse('remove-from-wishlist'), {'item_id': item.id})
+        self.assertRedirects(resp, reverse('wishlist'))
+        self.assertFalse(WishlistItem.objects.filter(id=item.id).exists())
+
+    def test_remove_by_pk_url(self):
+        """5. Removing by pk URL removes only the specified item."""
+        item = WishlistItem.objects.create(user=self.user, product=self.product1)
+        self.client.login(username=self.user.username, password=self.password)
+        resp = self.client.post(reverse('remove-from-wishlist-pk', kwargs={'pk': item.pk}))
+        self.assertRedirects(resp, reverse('wishlist'))
+        self.assertFalse(WishlistItem.objects.filter(id=item.id).exists())
+
+    def test_ownership_isolation_user_cannot_delete_another_users_item(self):
+        """6. Customer cannot delete another user's wishlist item."""
+        item_user = WishlistItem.objects.create(user=self.user, product=self.product1)
+        self.client.login(username=self.other_user.username, password=self.password)
+
+        # Other user tries to remove User A's item
+        resp = self.client.post(reverse('remove-from-wishlist'), {'item_id': item_user.id})
+        self.assertTrue(WishlistItem.objects.filter(id=item_user.id).exists())
+
+    def test_invalid_product_id_handled_gracefully(self):
+        """7. Adding an invalid/non-existent product ID returns 404."""
+        self.client.login(username=self.user.username, password=self.password)
+        resp = self.client.post(reverse('add-to-wishlist'), {'prod_id': 999999})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_wishlist_list_view_and_empty_state(self):
+        """8. Wishlist list view displays items and displays empty state when empty."""
+        self.client.login(username=self.user.username, password=self.password)
+
+        # Empty state
+        resp = self.client.get(reverse('wishlist'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Your Wishlist is Empty")
+
+        # Populated state
+        WishlistItem.objects.create(user=self.user, product=self.product1)
+        resp_pop = self.client.get(reverse('wishlist'))
+        self.assertEqual(resp_pop.status_code, 200)
+        self.assertContains(resp_pop, self.product1.title)
+
+    def test_wishlist_context_processor_count(self):
+        """9. wishlist_item_count context processor returns accurate item counts."""
+        from app.context_processors import wishlist_item_count
+        from django.test.client import RequestFactory
+        factory = RequestFactory()
+
+        req = factory.get('/')
+        req.user = self.user
+        self.assertEqual(wishlist_item_count(req)['wishlist_item_count'], 0)
+
+        WishlistItem.objects.create(user=self.user, product=self.product1)
+        self.assertEqual(wishlist_item_count(req)['wishlist_item_count'], 1)
+
+        from django.contrib.auth.models import AnonymousUser
+        req.user = AnonymousUser()
+        self.assertEqual(wishlist_item_count(req)['wishlist_item_count'], 0)
+
+    def test_wishlist_post_only_mutations(self):
+        """10. GET requests to wishlist mutation endpoints are rejected with 405."""
+        self.client.login(username=self.user.username, password=self.password)
+        self.assertEqual(self.client.get(reverse('add-to-wishlist')).status_code, 405)
+        self.assertEqual(self.client.get(reverse('remove-from-wishlist')).status_code, 405)
+
+
+class ProductReviewTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.password = 'ReviewPass123!@#'
+        self.user = User.objects.create_user(
+            username='reviewer_user',
+            email='reviewer@example.com',
+            password=self.password
+        )
+        self.other_user = User.objects.create_user(
+            username='non_buyer_user',
+            email='non_buyer@example.com',
+            password=self.password
+        )
+        self.staff_user = User.objects.create_user(
+            username='review_staff',
+            email='staff_rev@example.com',
+            password=self.password,
+            is_staff=True,
+            is_superuser=True
+        )
+
+        self.product = Product.objects.create(
+            title='Farm Fresh Full Cream Milk',
+            selling_price=90.00,
+            discounted_price=80.00,
+            description='Pure organic milk',
+            category='ML',
+            stock=30
+        )
+        self.unrelated_product = Product.objects.create(
+            title='Organic Butter',
+            selling_price=200.00,
+            discounted_price=180.00,
+            description='Unsalted fresh butter',
+            category='GH',
+            stock=20
+        )
+
+        # Delivered order for self.user containing self.product
+        self.delivered_order = Order.objects.create(
+            user=self.user,
+            shipping_name='Reviewer Customer',
+            shipping_mobile='01800000000',
+            shipping_locality='Banani',
+            shipping_city='Dhaka',
+            shipping_zipcode='1213',
+            shipping_state='Dhaka',
+            subtotal=Decimal('160.00'),
+            total_discount=Decimal('20.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('230.00'),
+            status='DELIVERED',
+            payment_status='PAID',
+            stock_deducted=True,
+        )
+        self.delivered_item = OrderItem.objects.create(
+            order=self.delivered_order,
+            product=self.product,
+            product_name=self.product.title,
+            unit_price=Decimal('80.00'),
+            quantity=2,
+            subtotal=Decimal('160.00')
+        )
+
+        # Pending order for self.other_user containing self.product
+        self.pending_order = Order.objects.create(
+            user=self.other_user,
+            shipping_name='Pending Customer',
+            shipping_mobile='01900000000',
+            shipping_locality='Gulshan',
+            shipping_city='Dhaka',
+            shipping_zipcode='1212',
+            shipping_state='Dhaka',
+            subtotal=Decimal('80.00'),
+            total_discount=Decimal('10.00'),
+            delivery_charge=Decimal('70.00'),
+            grand_total=Decimal('150.00'),
+            status='PENDING',
+            payment_status='PENDING',
+        )
+        self.pending_item = OrderItem.objects.create(
+            order=self.pending_order,
+            product=self.product,
+            product_name=self.product.title,
+            unit_price=Decimal('80.00'),
+            quantity=1,
+            subtotal=Decimal('80.00')
+        )
+
+    def test_delivered_order_permits_review(self):
+        """1. Customer with delivered order can submit a review; review is approved by default."""
+        self.client.login(username=self.user.username, password=self.password)
+        data = {
+            'rating': 5,
+            'title': 'Best milk in town',
+            'comment': 'Rich, creamy and fresh. Will definitely order again.'
+        }
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.product.pk}), data)
+        self.assertRedirects(resp, reverse('product-detail', kwargs={'pk': self.product.pk}))
+
+        review = ProductReview.objects.filter(user=self.user, product=self.product).first()
+        self.assertIsNotNone(review)
+        self.assertEqual(review.rating, 5)
+        self.assertEqual(review.title, 'Best milk in town')
+        self.assertEqual(review.status, 'PENDING')
+        self.assertFalse(review.is_approved)
+
+    def test_undelivered_order_does_not_qualify(self):
+        """2. Customer with pending or undelivered order cannot review."""
+        self.client.login(username=self.other_user.username, password=self.password)
+        data = {
+            'rating': 4,
+            'title': 'Looks good',
+            'comment': 'Waiting for delivery.'
+        }
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.product.pk}), data)
+        self.assertRedirects(resp, reverse('product-detail', kwargs={'pk': self.product.pk}))
+        self.assertFalse(ProductReview.objects.filter(user=self.other_user, product=self.product).exists())
+
+    def test_order_for_different_product_does_not_qualify(self):
+        """3. Customer with delivered order for Product A cannot review Product B."""
+        self.client.login(username=self.user.username, password=self.password)
+        data = {
+            'rating': 5,
+            'title': 'Trying out butter',
+            'comment': 'Have not bought butter yet.'
+        }
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.unrelated_product.pk}), data)
+        self.assertRedirects(resp, reverse('product-detail', kwargs={'pk': self.unrelated_product.pk}))
+        self.assertFalse(ProductReview.objects.filter(user=self.user, product=self.unrelated_product).exists())
+
+    def test_unauthenticated_user_cannot_review(self):
+        """4. Anonymous user cannot submit review and is redirected to login."""
+        data = {'rating': 5, 'comment': 'Anonymous review'}
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.product.pk}), data)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse('login'), resp.url)
+        self.assertEqual(ProductReview.objects.count(), 0)
+
+    def test_rating_validation_rejects_out_of_range(self):
+        """5. Ratings below 1 or above 5 are rejected."""
+        self.client.login(username=self.user.username, password=self.password)
+
+        # Rating 0 (below 1)
+        resp_low = self.client.post(
+            reverse('submit-review', kwargs={'pk': self.product.pk}),
+            {'rating': 0, 'comment': 'Zero star review'}
+        )
+        self.assertFalse(ProductReview.objects.filter(user=self.user, product=self.product).exists())
+
+        # Rating 6 (above 5)
+        resp_high = self.client.post(
+            reverse('submit-review', kwargs={'pk': self.product.pk}),
+            {'rating': 6, 'comment': 'Six star review'}
+        )
+        self.assertFalse(ProductReview.objects.filter(user=self.user, product=self.product).exists())
+
+    def test_duplicate_review_prevented_by_unique_constraint(self):
+        """6. Customer cannot have multiple reviews for the same product in DB."""
+        ProductReview.objects.create(
+            user=self.user,
+            product=self.product,
+            rating=4,
+            comment='First review'
+        )
+        with self.assertRaises(IntegrityError):
+            ProductReview.objects.create(
+                user=self.user,
+                product=self.product,
+                rating=5,
+                comment='Second review'
+            )
+
+    def test_user_can_edit_own_review(self):
+        """7. Verified purchaser editing their review updates rating and text."""
+        ProductReview.objects.create(
+            user=self.user,
+            product=self.product,
+            rating=3,
+            title='Initial thoughts',
+            comment='It was okay initially.'
+        )
+        self.client.login(username=self.user.username, password=self.password)
+
+        update_data = {
+            'rating': 5,
+            'title': 'Updated thoughts: Amazing!',
+            'comment': 'After trying more recipes, it is fantastic.'
+        }
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.product.pk}), update_data)
+        self.assertRedirects(resp, reverse('product-detail', kwargs={'pk': self.product.pk}))
+
+        self.assertEqual(ProductReview.objects.filter(user=self.user, product=self.product).count(), 1)
+        rev = ProductReview.objects.get(user=self.user, product=self.product)
+        self.assertEqual(rev.rating, 5)
+        self.assertEqual(rev.title, 'Updated thoughts: Amazing!')
+        self.assertEqual(rev.comment, 'After trying more recipes, it is fantastic.')
+        self.assertEqual(rev.status, 'PENDING')
+        self.assertFalse(rev.is_approved)
+
+    def test_crafted_post_cannot_tamper_authorship_or_status(self):
+        """8. Client POST cannot alter review user, product, or moderation status."""
+        self.client.login(username=self.user.username, password=self.password)
+        crafted_data = {
+            'rating': 5,
+            'title': 'Crafted Hack',
+            'comment': 'Trying to impersonate staff or someone else',
+            'user': self.other_user.id,
+            'product': self.unrelated_product.id,
+            'status': 'REJECTED'
+        }
+        resp = self.client.post(reverse('submit-review', kwargs={'pk': self.product.pk}), crafted_data)
+
+        rev = ProductReview.objects.get(user=self.user, product=self.product)
+        self.assertEqual(rev.user, self.user)
+        self.assertEqual(rev.product, self.product)
+        self.assertEqual(rev.status, 'PENDING')
+
+    def test_only_approved_reviews_affect_averages_and_counts(self):
+        """9. Unapproved (rejected/pending) reviews do not factor into averages or public counts."""
+        u1 = User.objects.create_user(username='u1', password='Password123!')
+        u2 = User.objects.create_user(username='u2', password='Password123!')
+        u3 = User.objects.create_user(username='u3', password='Password123!')
+
+        ProductReview.objects.create(user=u1, product=self.product, rating=5, comment='Great', status='APPROVED')
+        ProductReview.objects.create(user=u2, product=self.product, rating=1, comment='Hated it', status='REJECTED')
+        ProductReview.objects.create(user=u3, product=self.product, rating=1, comment='Pending', status='PENDING')
+
+        self.assertEqual(self.product.review_count, 1)
+        self.assertEqual(self.product.average_rating, 5.0)
+
+        resp = self.client.get(reverse('product-detail', kwargs={'pk': self.product.pk}))
+        self.assertEqual(resp.context['reviews_count'], 1)
+        self.assertEqual(resp.context['avg_rating'], 5.0)
+        self.assertContains(resp, 'Great')
+        self.assertNotContains(resp, 'Hated it')
+        self.assertNotContains(resp, 'Pending')
+
+    def test_staff_review_moderation_admin_actions(self):
+        """10. Staff can approve, reject, or mark reviews as pending in Django admin."""
+        rev = ProductReview.objects.create(
+            user=self.user,
+            product=self.product,
+            rating=2,
+            comment='Mediocre',
+            status='PENDING'
+        )
+        self.client.login(username=self.staff_user.username, password=self.password)
+
+        # Admin approve action
+        approve_data = {
+            'action': 'approve_reviews',
+            '_selected_action': [str(rev.pk)],
+        }
+        self.client.post('/admin/app/productreview/', approve_data)
+        rev.refresh_from_db()
+        self.assertEqual(rev.status, 'APPROVED')
+
+        # Admin reject action
+        reject_data = {
+            'action': 'reject_reviews',
+            '_selected_action': [str(rev.pk)],
+        }
+        self.client.post('/admin/app/productreview/', reject_data)
+        rev.refresh_from_db()
+        self.assertEqual(rev.status, 'REJECTED')
+
+    def test_delete_own_review(self):
+        """11. Customer can delete their own review via POST, but cannot delete another customer's review."""
+        rev1 = ProductReview.objects.create(user=self.user, product=self.product, rating=4, comment='Review 1')
+        rev2 = ProductReview.objects.create(user=self.other_user, product=self.unrelated_product, rating=5, comment='Review 2')
+
+        self.client.login(username=self.user.username, password=self.password)
+
+        # User A attempts to delete User B's review -> 404
+        resp_unauth = self.client.post(reverse('delete-review', kwargs={'pk': rev2.pk}))
+        self.assertEqual(resp_unauth.status_code, 404)
+        self.assertTrue(ProductReview.objects.filter(pk=rev2.pk).exists())
+
+        # User A deletes their own review -> success
+        resp_auth = self.client.post(reverse('delete-review', kwargs={'pk': rev1.pk}))
+        self.assertRedirects(resp_auth, reverse('product-detail', kwargs={'pk': self.product.pk}))
+        self.assertFalse(ProductReview.objects.filter(pk=rev1.pk).exists())
+
+
+
+# ==============================================================================
+# PHASE 9: PRODUCT SEARCH, FILTERING, SORTING & PAGINATION TESTS
+# ==============================================================================
+class ProductSearchAndFilterTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            username='search_tester',
+            email='tester@example.com',
+            password='TestPassword123!'
+        )
+
+        # Diverse set of products across categories, prices, stocks
+        self.p_milk1 = Product.objects.create(
+            title="Fresh Organic Cow Milk",
+            description="Pure pasteurized organic whole milk from happy cows.",
+            selling_price=100.0,
+            discounted_price=90.0,
+            category="ML",
+            stock=25
+        )
+        self.p_milk2 = Product.objects.create(
+            title="Skimmed Diet Milk",
+            description="Low fat healthy milk for fitness enthusiasts.",
+            selling_price=80.0,
+            discounted_price=75.0,
+            category="ML",
+            stock=10
+        )
+        self.p_curd = Product.objects.create(
+            title="Traditional Sweet Curd",
+            description="Thick creamy sweet mishti doi.",
+            selling_price=150.0,
+            discounted_price=140.0,
+            category="CR",
+            stock=15
+        )
+        self.p_cheese = Product.objects.create(
+            title="Artisan Mozzarella Cheese",
+            description="Fresh string mozzarella cheese for pizza and pasta.",
+            selling_price=300.0,
+            discounted_price=270.0,
+            category="CZ",
+            stock=8
+        )
+        self.p_ghee = Product.objects.create(
+            title="Pure Cow Ghee",
+            description="Aromatic golden ghee made from fresh butter.",
+            selling_price=600.0,
+            discounted_price=550.0,
+            category="GH",
+            stock=0  # Out of stock
+        )
+
+    def test_search_by_title_case_insensitive(self):
+        """1. Search query matches product title case-insensitively."""
+        resp = self.client.get(reverse('search'), {'q': 'cow'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertIn("Fresh Organic Cow Milk", titles)
+        self.assertIn("Pure Cow Ghee", titles)
+        self.assertNotIn("Skimmed Diet Milk", titles)
+        self.assertNotIn("Traditional Sweet Curd", titles)
+
+    def test_search_by_description_case_insensitive(self):
+        """2. Search query matches product description case-insensitively."""
+        resp = self.client.get(reverse('search'), {'q': 'fitness'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0].title, "Skimmed Diet Milk")
+
+    def test_search_with_whitespace_stripping(self):
+        """3. Search query with leading/trailing whitespace is trimmed."""
+        resp = self.client.get(reverse('search'), {'q': '   mozzarella   '})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0].title, "Artisan Mozzarella Cheese")
+
+    def test_search_empty_query_returns_all_products(self):
+        """4. Empty or whitespace-only search query returns all products."""
+        resp = self.client.get(reverse('search'), {'q': '   '})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['total_count'], 5)
+
+    def test_search_no_matches_displays_empty_state(self):
+        """5. Search with no matches returns 200 and renders empty state."""
+        resp = self.client.get(reverse('search'), {'q': 'nonexistentitem123'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['total_count'], 0)
+        self.assertContains(resp, "No Products Found")
+
+    def test_search_special_characters_handled_safely(self):
+        """6. Search with SQL injection attempt or special characters executes safely."""
+        malicious_queries = ["' OR 1=1 --", "<script>alert('xss')</script>", "%", "_", "'; DROP TABLE app_product; --"]
+        for q in malicious_queries:
+            resp = self.client.get(reverse('search'), {'q': q})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(Product.objects.count(), 5)
+
+    def test_category_filter_exact_match(self):
+        """7. Filtering by category returns only products belonging to that category."""
+        resp = self.client.get(reverse('search'), {'category': 'ML'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        self.assertEqual(len(products), 2)
+        for p in products:
+            self.assertEqual(p.category, 'ML')
+
+    def test_category_filter_all_returns_all(self):
+        """8. Category set to 'all' or empty returns products across all categories."""
+        resp = self.client.get(reverse('search'), {'category': 'all'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['total_count'], 5)
+
+    def test_category_alias_handling_cheese(self):
+        """9. Category alias 'CH' is normalized to 'CZ' (Cheese)."""
+        resp = self.client.get(reverse('search'), {'category': 'CH'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0].title, "Artisan Mozzarella Cheese")
+
+    def test_price_range_filter_min_only(self):
+        """10. Price range filter with min_price only (against discounted_price)."""
+        resp = self.client.get(reverse('search'), {'min_price': '200'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertIn("Artisan Mozzarella Cheese", titles)
+        self.assertIn("Pure Cow Ghee", titles)
+        self.assertNotIn("Fresh Organic Cow Milk", titles)
+        self.assertNotIn("Traditional Sweet Curd", titles)
+
+    def test_price_range_filter_max_only(self):
+        """11. Price range filter with max_price only (against discounted_price)."""
+        resp = self.client.get(reverse('search'), {'max_price': '100'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertIn("Fresh Organic Cow Milk", titles)
+        self.assertIn("Skimmed Diet Milk", titles)
+        self.assertNotIn("Traditional Sweet Curd", titles)
+        self.assertNotIn("Pure Cow Ghee", titles)
+
+    def test_price_range_filter_min_and_max(self):
+        """12. Price range filter with both min_price and max_price."""
+        resp = self.client.get(reverse('search'), {'min_price': '80', 'max_price': '200'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertIn("Fresh Organic Cow Milk", titles)
+        self.assertIn("Traditional Sweet Curd", titles)
+        self.assertNotIn("Skimmed Diet Milk", titles)
+        self.assertNotIn("Artisan Mozzarella Cheese", titles)
+
+    def test_price_range_invalid_values_handled_gracefully(self):
+        """13. Non-numeric or negative price values do not crash (200 OK with friendly warnings)."""
+        resp = self.client.get(reverse('search'), {'min_price': 'abc', 'max_price': '-50'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(len(resp.context['filter_errors']) > 0)
+        self.assertEqual(resp.context['total_count'], 5)
+
+    def test_price_range_min_greater_than_max_handled_gracefully(self):
+        """14. When min_price > max_price, system reports validation notice without 500."""
+        resp = self.client.get(reverse('search'), {'min_price': '500', 'max_price': '100'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Minimum price cannot be greater than maximum price.", resp.context['filter_errors'])
+
+    def test_in_stock_filter_excludes_out_of_stock(self):
+        """15. in_stock=1 filter excludes products with stock <= 0."""
+        resp = self.client.get(reverse('search'), {'in_stock': '1'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertNotIn("Pure Cow Ghee", titles)
+        self.assertIn("Fresh Organic Cow Milk", titles)
+        self.assertEqual(resp.context['total_count'], 4)
+
+    def test_rating_filter_uses_approved_reviews_only(self):
+        """16. Minimum rating filter counts only APPROVED reviews, ignoring PENDING/REJECTED."""
+        u1 = User.objects.create_user(username='u_rev1', password='Password123!')
+        u2 = User.objects.create_user(username='u_rev2', password='Password123!')
+
+        ProductReview.objects.create(user=u1, product=self.p_milk1, rating=5, comment='Super fresh', status='APPROVED')
+        ProductReview.objects.create(user=u2, product=self.p_milk2, rating=5, comment='Nice', status='PENDING')
+
+        resp = self.client.get(reverse('search'), {'rating': '4'})
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        titles = [p.title for p in products]
+        self.assertIn("Fresh Organic Cow Milk", titles)
+        self.assertNotIn("Skimmed Diet Milk", titles)
+        self.assertNotIn("Traditional Sweet Curd", titles)
+
+    def test_sorting_options(self):
+        """17. Sorting allowlist orders correctly with deterministic tie-breakers."""
+        resp_low = self.client.get(reverse('search'), {'sort': 'price_low'})
+        self.assertEqual(resp_low.status_code, 200)
+        prices_low = [p.discounted_price for p in resp_low.context['product']]
+        self.assertEqual(prices_low, sorted(prices_low))
+
+        resp_high = self.client.get(reverse('search'), {'sort': 'price_high'})
+        self.assertEqual(resp_high.status_code, 200)
+        prices_high = [p.discounted_price for p in resp_high.context['product']]
+        self.assertEqual(prices_high, sorted(prices_high, reverse=True))
+
+        resp_name = self.client.get(reverse('search'), {'sort': 'name_asc'})
+        self.assertEqual(resp_name.status_code, 200)
+        titles = [p.title for p in resp_name.context['product']]
+        self.assertEqual(titles, sorted(titles))
+
+        resp_invalid = self.client.get(reverse('search'), {'sort': 'invalid_random_sort'})
+        self.assertEqual(resp_invalid.status_code, 200)
+        self.assertEqual(resp_invalid.context['selected_sort'], 'newest')
+
+    def test_combined_search_filter_and_sort(self):
+        """18. Search, category, price, in_stock, and sorting work simultaneously."""
+        resp = self.client.get(reverse('search'), {
+            'q': 'milk',
+            'category': 'ML',
+            'min_price': '70',
+            'max_price': '100',
+            'in_stock': '1',
+            'sort': 'price_low'
+        })
+        self.assertEqual(resp.status_code, 200)
+        products = list(resp.context['product'])
+        self.assertEqual(len(products), 2)
+        self.assertEqual(products[0].title, "Skimmed Diet Milk")
+        self.assertEqual(products[1].title, "Fresh Organic Cow Milk")
+
+    def test_pagination_12_items_per_page(self):
+        """19. Products are paginated at 12 items per page."""
+        for i in range(10):
+            Product.objects.create(
+                title=f"Bulk Product {i:02d}",
+                description="Sample bulk product description",
+                selling_price=120.0,
+                discounted_price=100.0,
+                category="ML",
+                stock=10
+            )
+        self.assertEqual(Product.objects.count(), 15)
+
+        resp_p1 = self.client.get(reverse('search'), {'page': '1'})
+        self.assertEqual(resp_p1.status_code, 200)
+        self.assertEqual(len(list(resp_p1.context['product'])), 12)
+        self.assertTrue(resp_p1.context['page_obj'].has_next())
+        self.assertFalse(resp_p1.context['page_obj'].has_previous())
+
+        resp_p2 = self.client.get(reverse('search'), {'page': '2'})
+        self.assertEqual(resp_p2.status_code, 200)
+        self.assertEqual(len(list(resp_p2.context['product'])), 3)
+        self.assertFalse(resp_p2.context['page_obj'].has_next())
+        self.assertTrue(resp_p2.context['page_obj'].has_previous())
+
+    def test_pagination_invalid_page_falls_back_to_page_1(self):
+        """20. Invalid or negative page string gracefully defaults to page 1."""
+        resp_str = self.client.get(reverse('search'), {'page': 'abc'})
+        self.assertEqual(resp_str.status_code, 200)
+        self.assertEqual(resp_str.context['page_obj'].number, 1)
+
+        resp_neg = self.client.get(reverse('search'), {'page': '-5'})
+        self.assertEqual(resp_neg.status_code, 200)
+        self.assertEqual(resp_neg.context['page_obj'].number, 1)
+
+    def test_pagination_out_of_bounds_page_returns_last_page(self):
+        """21. Out of bounds page number gracefully returns the last page."""
+        for i in range(10):
+            Product.objects.create(
+                title=f"Extra Product {i}",
+                description="Extra product description",
+                selling_price=100.0,
+                discounted_price=90.0,
+                category="CR",
+                stock=5
+            )
+        resp = self.client.get(reverse('search'), {'page': '9999'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['page_obj'].number, 2)
+
+    def test_pagination_preserves_query_parameters(self):
+        """22. Pagination links preserve active search, filter, and sort query parameters."""
+        for i in range(10):
+            Product.objects.create(
+                title=f"Pagination Milk {i}",
+                description="Organic milk",
+                selling_price=100.0,
+                discounted_price=90.0,
+                category="ML",
+                stock=10
+            )
+
+        resp = self.client.get(reverse('search'), {
+            'q': 'milk',
+            'category': 'ML',
+            'sort': 'price_low',
+            'page': '1'
+        })
+        self.assertEqual(resp.status_code, 200)
+        preserved = resp.context['preserved_query_params']
+        self.assertIn('q=milk', preserved)
+        self.assertIn('category=ML', preserved)
+        self.assertIn('sort=price_low', preserved)
+        self.assertNotIn('page=', preserved)
+
+    def test_navbar_search_form_in_base_template(self):
+        """23. Navbar contains search form submitting to search URL with query parameter q."""
+        resp = self.client.get(reverse('home'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'action="/search/"')
+        self.assertContains(resp, 'name="q"')
+
+
+
+# ==============================================================================
+# PHASE 10: SHOPPING CART & CHECKOUT UX IMPROVEMENTS TESTS
+# ==============================================================================
+class CartAndCheckoutUXTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username='ux_user', password='Password123!')
+        self.other_user = User.objects.create_user(username='other_ux', password='Password123!')
+
+        self.customer = Customer.objects.create(
+            user=self.user,
+            name="Tamim Iqbal",
+            mobile="01711223344",
+            locality="Dhanmondi Road 2",
+            city="Dhaka",
+            state="Dhaka",
+            zipcode=1205
+        )
+
+        self.p1 = Product.objects.create(
+            title="Premium Cow Milk",
+            description="Fresh pure cow milk",
+            selling_price=100.0,
+            discounted_price=85.0,
+            category="ML",
+            stock=15
+        )
+        self.p2 = Product.objects.create(
+            title="Farm Cheese Block",
+            description="Artisan cheese",
+            selling_price=350.0,
+            discounted_price=300.0,
+            category="CZ",
+            stock=5
+        )
+        self.p_oos = Product.objects.create(
+            title="Limited Butter",
+            description="Sold out butter",
+            selling_price=200.0,
+            discounted_price=180.0,
+            category="GH",
+            stock=0
+        )
+
+        self.cart = Cart.objects.create(user=self.user)
+        self.item1 = CartItem.objects.create(cart=self.cart, product=self.p1, quantity=2)
+
+    def test_cart_displays_correct_totals_and_delivery_charge(self):
+        """1. Cart view calculates subtotal, savings, delivery charge (70), and estimated total."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.get(reverse('show-cart'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['cart_subtotal'], 170.0)
+        self.assertEqual(resp.context['total_discount'], 30.0)
+        self.assertEqual(resp.context['delivery_charge'], 70.0)
+        self.assertEqual(resp.context['estimated_total'], 240.0)
+
+    def test_direct_quantity_update_valid(self):
+        """2. Direct quantity update sets new valid quantity and re-calculates subtotal."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': self.item1.id,
+            'quantity': 5
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        self.item1.refresh_from_db()
+        self.assertEqual(self.item1.quantity, 5)
+
+    def test_direct_quantity_update_zero_removes_item(self):
+        """3. Setting quantity to 0 removes the item from the cart."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': self.item1.id,
+            'quantity': 0
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        self.assertFalse(CartItem.objects.filter(id=self.item1.id).exists())
+
+    def test_direct_quantity_update_negative_rejected(self):
+        """4. Setting negative quantity is rejected without altering cart item."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': self.item1.id,
+            'quantity': -3
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        self.item1.refresh_from_db()
+        self.assertEqual(self.item1.quantity, 2)
+
+    def test_direct_quantity_update_non_numeric_rejected(self):
+        """5. Setting non-numeric quantity is rejected gracefully."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': self.item1.id,
+            'quantity': 'invalid_qty'
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        self.item1.refresh_from_db()
+        self.assertEqual(self.item1.quantity, 2)
+
+    def test_direct_quantity_update_exceeding_stock_rejected(self):
+        """6. Setting quantity higher than available stock is rejected."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': self.item1.id,
+            'quantity': 20
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        self.item1.refresh_from_db()
+        self.assertEqual(self.item1.quantity, 2)
+
+    def test_cart_mutations_reject_get_request(self):
+        """7. GET requests to cart mutation endpoints are strictly rejected with 405."""
+        self.client.login(username='ux_user', password='Password123!')
+        for url_name in ['plus-cart', 'minus-cart', 'remove-cart', 'update-cart']:
+            resp = self.client.get(reverse(url_name))
+            self.assertEqual(resp.status_code, 405)
+
+    def test_user_cannot_update_another_users_cart_item(self):
+        """8. Customer cannot update quantity of another customer's cart item."""
+        other_cart = Cart.objects.create(user=self.other_user)
+        other_item = CartItem.objects.create(cart=other_cart, product=self.p1, quantity=3)
+
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('update-cart'), {
+            'item_id': other_item.id,
+            'quantity': 10
+        })
+        self.assertRedirects(resp, reverse('show-cart'))
+        other_item.refresh_from_db()
+        self.assertEqual(other_item.quantity, 3)
+
+    def test_cart_flags_stock_errors_when_product_stock_drops(self):
+        """9. When stock drops below cart quantity, cart detects has_stock_error."""
+        self.p1.stock = 1
+        self.p1.save()
+
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.get(reverse('show-cart'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['has_stock_error'])
+        self.assertContains(resp, "Some items in your cart exceed available stock")
+
+    def test_checkout_blocks_when_stock_insufficient(self):
+        """10. Checkout redirects to cart with error when cart quantity exceeds product stock."""
+        self.p1.stock = 1
+        self.p1.save()
+
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.get(reverse('checkout'))
+        self.assertRedirects(resp, reverse('show-cart'))
+
+    def test_checkout_blocks_empty_cart(self):
+        """11. User with empty cart cannot access checkout."""
+        self.cart.items.all().delete()
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.get(reverse('checkout'))
+        self.assertRedirects(resp, reverse('show-cart'))
+
+    def test_checkout_order_summary_accurate(self):
+        """12. Checkout view shows authoritative server-calculated summary."""
+        CartItem.objects.create(cart=self.cart, product=self.p2, quantity=1)
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.get(reverse('checkout'))
+        self.assertEqual(resp.status_code, 200)
+        expected_subtotal = Decimal('470.00')
+        expected_delivery = Decimal('70.00')
+        expected_grand_total = Decimal('540.00')
+        self.assertEqual(resp.context['subtotal'], expected_subtotal)
+        self.assertEqual(resp.context['delivery_charge'], expected_delivery)
+        self.assertEqual(resp.context['grand_total'], expected_grand_total)
+
+    def test_place_order_cod_success_clears_cart_and_deducts_stock(self):
+        """13. Successful COD checkout creates order, deducts stock, and clears cart."""
+        initial_stock = self.p1.stock
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+
+        order = Order.objects.filter(user=self.user).first()
+        self.assertIsNotNone(order)
+        self.assertRedirects(resp, reverse('order-confirmation', kwargs={'pk': order.pk}))
+
+        self.assertEqual(self.cart.items.count(), 0)
+
+        self.p1.refresh_from_db()
+        self.assertEqual(self.p1.stock, initial_stock - 2)
+        self.assertTrue(order.stock_deducted)
+
+        self.assertEqual(order.payment_status, 'PENDING')
+        payment = order.payments.first()
+        self.assertIsNotNone(payment)
+        self.assertEqual(payment.payment_method, 'COD')
+        self.assertEqual(payment.status, 'PENDING')
+
+    def test_place_order_custom_shipping_snapshot(self):
+        """14. Place order accepts customized delivery details without altering permanent profile."""
+        self.client.login(username='ux_user', password='Password123!')
+        resp = self.client.post(reverse('place-order'), {
+            'payment_method': 'COD',
+            'shipping_name': 'Custom Recipient',
+            'shipping_mobile': '01999888777',
+            'shipping_locality': 'Banani Block C',
+            'shipping_city': 'Dhaka',
+            'shipping_state': 'Dhaka',
+            'shipping_zipcode': '1213'
+        })
+        order = Order.objects.filter(user=self.user).first()
+        self.assertEqual(order.shipping_name, 'Custom Recipient')
+        self.assertEqual(order.shipping_mobile, '01999888777')
+        self.assertEqual(order.shipping_locality, 'Banani Block C')
+
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, 'Tamim Iqbal')
+
+    def test_place_order_atomic_rollback_on_failure(self):
+        """15. If order placement encounters an unexpected error midway, transaction rolls back."""
+        with patch('app.views.create_payment', side_effect=Exception("Payment gateway initialization crash")):
+            self.client.login(username='ux_user', password='Password123!')
+            with self.assertRaises(Exception):
+                self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(self.cart.items.count(), 1)
+        self.p1.refresh_from_db()
+        self.assertEqual(self.p1.stock, 15)
+
+    def test_order_confirmation_does_not_display_payment_successful_for_unpaid(self):
+        """16. Order confirmation does not display 'Payment successful' for unpaid COD order."""
+        self.client.login(username='ux_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        resp = self.client.get(reverse('order-confirmation', kwargs={'pk': order.pk}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "Payment Verified & Order Confirmed!")
+        self.assertContains(resp, "Thank You for Your Order!")
+        self.assertContains(resp, "Next Steps for Your Order")
+
+    def test_order_confirmation_displays_payment_verified_when_paid(self):
+        """17. Order confirmation displays Payment Verified when order.payment_status is PAID."""
+        self.client.login(username='ux_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+        order.payment_status = 'PAID'
+        order.save()
+
+        resp = self.client.get(reverse('order-confirmation', kwargs={'pk': order.pk}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Payment Verified &amp; Order Confirmed!")
+
+    def test_user_cannot_view_another_users_order_confirmation(self):
+        """18. Customer A cannot view Customer B's order confirmation via URL manipulation."""
+        self.client.login(username='ux_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        self.client.login(username='other_ux', password='Password123!')
+        resp = self.client.get(reverse('order-confirmation', kwargs={'pk': order.pk}))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_user_cannot_view_another_users_order_detail(self):
+        """19. Customer A cannot view Customer B's order detail."""
+        self.client.login(username='ux_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        order = Order.objects.get(user=self.user)
+
+        self.client.login(username='other_ux', password='Password123!')
+        resp = self.client.get(reverse('order-detail', kwargs={'pk': order.pk}))
+        self.assertEqual(resp.status_code, 404)
+
+
+
+# ==============================================================================
+# PHASE 10.1: CHECKOUT AND PAYMENT SAFETY AUDIT TESTS
+# ==============================================================================
+class Phase10SafetyAuditTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username='audit_user', password='Password123!')
+        self.customer = Customer.objects.create(
+            user=self.user,
+            name="Audit Customer",
+            mobile="01712345678",
+            locality="Dhanmondi 32",
+            city="Dhaka",
+            state="Dhaka",
+            zipcode=1209
+        )
+        self.product = Product.objects.create(
+            title="Safe Milk 1L",
+            selling_price=100.0,
+            discounted_price=80.0,
+            description="Audit fresh milk",
+            category="ML",
+            stock=10
+        )
+        self.cart = Cart.objects.create(user=self.user)
+        self.cart_item = CartItem.objects.create(cart=self.cart, product=self.product, quantity=2)
+
+    def test_duplicate_submission_does_not_duplicate_order_or_stock_deduction(self):
+        """1. Rapid duplicate checkout submission creates only 1 order and deducts stock only once."""
+        self.client.login(username='audit_user', password='Password123!')
+
+        resp1 = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 1)
+        order1 = Order.objects.get(user=self.user)
+        self.assertRedirects(resp1, reverse('order-confirmation', kwargs={'pk': order1.pk}))
+
+        resp2 = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 1)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(self.cart.items.count(), 0)
+        self.assertEqual(order1.items.count(), 1)
+        self.assertEqual(order1.items.first().quantity, 2)
+        self.assertRedirects(resp2, reverse('show-cart'))
+
+    def test_valid_repeat_purchase_after_order_completion(self):
+        """2. Customer can place a subsequent new order after previous order completes."""
+        self.client.login(username='audit_user', password='Password123!')
+
+        self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 1)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+
+        CartItem.objects.create(cart=self.cart, product=self.product, quantity=3)
+        self.assertEqual(self.cart.items.count(), 1)
+
+        resp = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+        self.assertEqual(Order.objects.filter(user=self.user).count(), 2)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(self.cart.items.count(), 0)
+
+    def test_concurrent_lock_operational_error_handled_gracefully(self):
+        """3. Database locking OperationalError during simultaneous submissions does not cause 500 error."""
+        from django.db import OperationalError
+        self.client.login(username='audit_user', password='Password123!')
+        with patch('app.views.deduct_order_stock', side_effect=OperationalError("database is locked")):
+            resp = self.client.post(reverse('place-order'), {'payment_method': 'COD'})
+            self.assertRedirects(resp, reverse('show-cart'))
+
+    def test_sslcommerz_repeated_successful_callbacks_idempotency(self):
+        """4. Repeated successful callbacks do not duplicate payments or inventory deductions."""
+        from app.services.payment import process_validated_payment
+        self.client.login(username='audit_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+        payment = order.payments.first()
+
+        val_payload = {
+            'status': 'VALID',
+            'tran_id': payment.transaction_id,
+            'val_id': 'VAL_12345678',
+            'amount': str(order.grand_total),
+            'currency': 'BDT',
+            'bank_tran_id': 'BANK_TXN_001',
+            'card_type': 'VISA',
+            'card_brand': 'VISA',
+            'risk_level': '0',
+            'risk_title': 'Safe',
+        }
+
+        success1, pay1 = process_validated_payment(val_payload)
+        self.assertTrue(success1)
+        self.assertEqual(pay1.status, 'PAID')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'PAID')
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(order.payments.count(), 1)
+
+        success2, pay2 = process_validated_payment(val_payload)
+        self.assertTrue(success2)
+        self.assertEqual(pay2.status, 'PAID')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'PAID')
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 8)
+        self.assertEqual(order.payments.count(), 1)
+
+    def test_sslcommerz_failed_cannot_downgrade_paid_payment(self):
+        """5. A failed or cancelled payment callback cannot downgrade an already PAID payment."""
+        from app.services.payment import process_validated_payment, process_failed_payment, process_cancelled_payment
+        self.client.login(username='audit_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+        payment = order.payments.first()
+
+        val_payload = {
+            'status': 'VALID',
+            'tran_id': payment.transaction_id,
+            'val_id': 'VAL_99999999',
+            'amount': str(order.grand_total),
+            'currency': 'BDT',
+        }
+        process_validated_payment(val_payload)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, 'PAID')
+
+        process_failed_payment(payment.transaction_id, reason="Late failure callback")
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, 'PAID')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'PAID')
+
+        process_cancelled_payment(payment.transaction_id)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, 'PAID')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'PAID')
+
+    def test_gateway_return_without_server_validation_cannot_mark_paid(self):
+        """6. Customer return without server-side validation is rejected and cannot mark paid."""
+        self.client.login(username='audit_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+        payment = order.payments.first()
+
+        resp = self.client.post(reverse('sslcommerz-success'), {'tran_id': payment.transaction_id})
+        self.assertRedirects(resp, reverse('orders'))
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, 'PENDING')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'PENDING')
+
+    def test_cancelled_order_does_not_display_retry_payment_form(self):
+        """7. Cancelled order does NOT render the online payment retry button on confirmation."""
+        from app.services.fulfillment import transition_order_status
+        self.client.login(username='audit_user', password='Password123!')
+        self.client.post(reverse('place-order'), {'payment_method': 'SSLCOMMERZ'})
+        order = Order.objects.get(user=self.user)
+
+        transition_order_status(order, 'CANCELLED', user=self.user, notes='Cancelled by user')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'CANCELLED')
+
+        resp = self.client.get(reverse('order-confirmation', kwargs={'pk': order.pk}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "Pay Now via SSLCommerz")
+        self.assertContains(resp, "This order has been cancelled.")
